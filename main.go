@@ -644,7 +644,7 @@ func fileManager(session *auth.Session) {
 	serial := session.Device.Serial
 	current := "/sdcard"
 	for {
-		if !strings.HasPrefix(current, "/sdcard") || strings.ContainsAny(current, " \t\r\n;&|$<>\\\"'") {
+		if (current != "/sdcard" && !strings.HasPrefix(current, "/sdcard/")) || strings.ContainsAny(current, " \t\r\n;&|$<>\\\"'") {
 			ui.PrintError("For safety, browse paths under /sdcard without shell-special characters.")
 			current = "/sdcard"
 		}
@@ -681,7 +681,7 @@ func fileManager(session *auth.Session) {
 			form = huh.NewForm(huh.NewGroup(huh.NewInput().Title("Directory under /sdcard").Placeholder("/sdcard/Download").Value(&next)))
 			if form.Run() != nil { continue }
 			next = strings.TrimSpace(next)
-			if !strings.HasPrefix(next, "/sdcard") || strings.ContainsAny(next, " \t\r\n;&|$<>\\\"'") {
+			if (next != "/sdcard" && !strings.HasPrefix(next, "/sdcard/")) || strings.ContainsAny(next, " \t\r\n;&|$<>\\\"'") {
 				ui.PrintError("Enter a safe absolute path under /sdcard.")
 				ui.Pause()
 				continue
