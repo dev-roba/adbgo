@@ -615,7 +615,7 @@ func showLogcat(session *auth.Session) {
 	var priority, pkg string
 	form := huh.NewForm(huh.NewGroup(
 		huh.NewSelect[string]().Title("Minimum log priority").Options(huh.NewOption("Verbose", "V"), huh.NewOption("Debug", "D"), huh.NewOption("Info", "I"), huh.NewOption("Warning", "W"), huh.NewOption("Error", "E"), huh.NewOption("Fatal", "F")).Value(&priority),
-		huh.NewInput().Title("Package filter (optional; matches log lines)").Placeholder("com.example.app").Value(&pkg),
+		huh.NewInput().Title("Package filter (optional; app must be running)").Placeholder("com.example.app").Value(&pkg),
 	))
 	if form.Run() != nil { return }
 	ui.PrintWarning("Streaming Logcat for up to 5 minutes; press Ctrl+C to stop.")
