@@ -681,9 +681,22 @@ func multiDeviceTools() {
 	for _, d := range devices { if d.Status == "device" { opts = append(opts, huh.NewOption(d.Serial+" ("+d.Model+")", d.Serial)) } }
 	if len(opts) < 2 { ui.PrintWarning("Connect at least two authorized devices for multi-device mode."); ui.Pause(); return }
 	var selected []string
-	form := huh.NewForm(huh.NewGroup(huh.NewMultiSelect[string]().Title("Select devices (read-only info action)").Options(opts...).Value(&selected)))
+	form := huh.NewForm(huh.NewGroup(huh.NewMultiSelect[string]().Title("Select devices").Options(opts...).Value(&selected)))
 	if form.Run() != nil || len(selected) == 0 { return }
+	var action string
+	form = huh.NewForm(huh.NewGroup(huh.NewSelect[string]().Title("Action for selected devices").Options(huh.NewOption("Read device model (safe)", "info"), huh.NewOption("Reboot selected devices", "reboot")).Value(&action)))
+	if form.Run() != nil { return }
+	if action == "reboot" {
+		fmt.Printf("This will reboot %d selected device(s): %s\n", len(selected), strings.Join(selected, ", "))
+		var confirm string
+		fmt.Print("Type REBOOT to continue: ")
+		if _, err := fmt.Scanln(&confirm); err != nil || confirm != "REBOOT" { ui.PrintWarning("Cancelled."); return }
+	}
 	for _, serial := range selected {
+		if action == "reboot" {
+			if err := adb.Reboot(serial, ""); err != nil { fmt.Printf("[%s] ERROR: %v\n", serial, err) } else { fmt.Printf("[%s] reboot command sent\n", serial) }
+			continue
+		}
 		out, err := adb.RunContext(context.Background(), serial, "shell", "getprop", "ro.product.model")
 		if err != nil { fmt.Printf("[%s] ERROR: %v\n", serial, err) } else { fmt.Printf("[%s] %s\n", serial, strings.TrimSpace(out)) }
 	}
