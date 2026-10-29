@@ -55,7 +55,7 @@ func InstallAPK(ctx context.Context, serial, path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("cannot access APK: %w", err)
 	}
-	if info.IsDir() || !strings.EqualFold(strings.TrimPrefix(strings.ToLower(path), ""), "") && !strings.HasSuffix(strings.ToLower(path), ".apk") {
+	if info.IsDir() || !strings.HasSuffix(strings.ToLower(path), ".apk") {
 		return "", fmt.Errorf("choose a .apk file")
 	}
 	return RunContext(ctx, serial, "install", "-r", path)
@@ -77,15 +77,33 @@ func Pull(ctx context.Context, serial, remotePath, localPath string) (string, er
 	return out, nil
 }
 
-// StreamLogcat streams log output until the caller cancels ctx. Priority accepts
-// V, D, I, W, E, or F; package filtering uses PID lookup and is best-effort.
+// StreamLogcat streams log output until ctx is cancelled. If packageName is
+// supplied, resolve its live PID and use logcat's PID filter instead of matching
+// arbitrary text in each line.
 func StreamLogcat(ctx context.Context, serial, priority, packageName string, dst io.Writer) error {
-	priority = strings.ToUpper(strings.TrimSpace(priority))
-	if priority == "" { priority = "V" }
-	if !strings.Contains("|V|D|I|W|E|F|", "|"+priority+"|") {
-		return fmt.Errorf("priority must be V, D, I, W, E, or F")
+	if strings.TrimSpace(serial) == "" {
+		return fmt.Errorf("device serial is required")
 	}
-	args := []string{"-s", serial, "logcat", "*:" + priority}
+	priority, err := NormalizePriority(priority)
+	if err != nil {
+		return err
+	}
+	args := []string{"-s", serial, "logcat"}
+	if packageName = strings.TrimSpace(packageName); packageName != "" {
+		if strings.ContainsAny(packageName, " \t\r\n") {
+			return fmt.Errorf("package name must not contain whitespace")
+		}
+		pidOutput, pidErr := RunContext(ctx, serial, "shell", "pidof", packageName)
+		if pidErr != nil {
+			return fmt.Errorf("cannot resolve PID for %q; is the app running? %w", packageName, pidErr)
+		}
+		pids := strings.Fields(pidOutput)
+		if len(pids) == 0 {
+			return fmt.Errorf("no running process found for package %q", packageName)
+		}
+		args = append(args, "--pid="+strings.Join(pids, ","))
+	}
+	args = append(args, "*:"+priority)
 	cmd := exec.CommandContext(ctx, "adb", args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil { return err }
@@ -95,9 +113,11 @@ func StreamLogcat(ctx context.Context, serial, priority, packageName string, dst
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
 	for scanner.Scan() {
-		line := scanner.Text()
-		if packageName != "" && !strings.Contains(line, packageName) { continue }
-		if _, err := fmt.Fprintln(dst, line); err != nil { _ = cmd.Process.Kill(); _ = cmd.Wait(); return err }
+		if _, err := fmt.Fprintln(dst, scanner.Text()); err != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return err
+		}
 	}
 	scanErr := scanner.Err()
 	waitErr := cmd.Wait()
