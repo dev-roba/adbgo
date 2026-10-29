@@ -495,6 +495,7 @@ func showAppManagement(session *auth.Session) {
 					huh.NewOption("List user packages", "list_user"),
 					huh.NewOption("List all packages", "list_all"),
 					huh.NewOption("Install APK (sideload)", "install"),
+					huh.NewOption("Launch app (search by keyword)", "launch"),
 					huh.NewOption("Force-stop app", "force_stop"),
 					huh.NewOption("Clear app data", "clear"),
 					huh.NewOption("Uninstall app", "uninstall"),
@@ -523,6 +524,8 @@ func showAppManagement(session *auth.Session) {
 		}
 	case "install":
 		installAPKFlow(serial)
+	case "launch":
+		launchAppFlow(serial)
 	case "force_stop", "clear", "uninstall":
 		fmt.Print("Enter package name: ")
 		pkg := ui.ReadLine()
@@ -594,6 +597,56 @@ func installAPKFlow(serial string) {
 		ui.PrintError("Install failed: " + err.Error())
 	} else {
 		ui.PrintSuccess("Installed " + apkPath)
+	}
+}
+
+// launchAppFlow asks for a keyword (e.g. "spotify"), matches it against
+// installed packages and launches the chosen app. Keywords are matched as
+// case-insensitive substrings of the package name (spotify → com.spotify.music).
+func launchAppFlow(serial string) {
+	fmt.Print("Enter app name or keyword (e.g. spotify, whatsapp, chrome): ")
+	keyword := ui.ReadLine()
+	if keyword == "" {
+		return
+	}
+
+	matches, err := adb.FindPackagesByKeyword(serial, keyword)
+	if err != nil {
+		ui.PrintError(err.Error())
+		return
+	}
+
+	switch len(matches) {
+	case 0:
+		ui.PrintError("No installed app matches '" + keyword + "'")
+		ui.PrintInfo("Tip: try a shorter keyword, or list packages first.")
+		return
+	case 1:
+		if err := adb.LaunchApp(serial, matches[0]); err != nil {
+			ui.PrintError("Launch failed: " + err.Error())
+		} else {
+			ui.PrintSuccess("Launched " + matches[0])
+		}
+	default:
+		opts := make([]huh.Option[string], len(matches))
+		for i, m := range matches {
+			opts[i] = huh.NewOption(m, m)
+		}
+		var sel string
+		form := huh.NewForm(huh.NewGroup(
+			huh.NewSelect[string]().
+				Title(fmt.Sprintf("%d apps match '%s' — pick one", len(matches), keyword)).
+				Options(opts...).
+				Value(&sel),
+		))
+		if err := form.Run(); err != nil {
+			return
+		}
+		if err := adb.LaunchApp(serial, sel); err != nil {
+			ui.PrintError("Launch failed: " + err.Error())
+		} else {
+			ui.PrintSuccess("Launched " + sel)
+		}
 	}
 }
 
