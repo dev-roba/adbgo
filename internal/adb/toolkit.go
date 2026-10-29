@@ -28,30 +28,65 @@ func RunContext(ctx context.Context, serial string, args ...string) (string, err
 	return string(out), nil
 }
 
-// ConnectTCPIP enables the legacy ADB-over-TCP mode on an already authorized
-// USB-connected device, then connects to the supplied Wi-Fi address.
-func ConnectTCPIP(ctx context.Context, serial, hostPort string) error {
-	if strings.TrimSpace(serial) == "" {
-		return fmt.Errorf("select a USB-connected device first")
-	}
-	host, portText, err := net.SplitHostPort(strings.TrimSpace(hostPort))
+// validateEndpoint checks an ADB host:port endpoint.
+func validateEndpoint(endpoint string) error {
+	host, portText, err := net.SplitHostPort(strings.TrimSpace(endpoint))
 	if err != nil || host == "" || strings.ContainsAny(host, " \t\r\n/") {
-		return fmt.Errorf("enter a valid phone address such as 192.168.1.20:5555")
+		return fmt.Errorf("enter a valid host:port endpoint, such as 192.168.1.20:5555")
 	}
 	port, err := strconv.Atoi(portText)
 	if err != nil || port < 1 || port > 65535 {
 		return fmt.Errorf("port must be a number from 1 to 65535")
 	}
+	return nil
+}
+
+// ConnectTCPIP enables legacy ADB-over-TCP on an authorized USB-connected
+// device and connects to its Wi-Fi endpoint.
+func ConnectTCPIP(ctx context.Context, serial, hostPort string) error {
+	if strings.TrimSpace(serial) == "" {
+		return fmt.Errorf("select a USB-connected device first")
+	}
+	if err := validateEndpoint(hostPort); err != nil { return err }
 	if _, err := RunContext(ctx, serial, "tcpip", "5555"); err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "adb", "connect", hostPort)
+	cmd := exec.CommandContext(ctx, "adb", "connect", strings.TrimSpace(hostPort))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("adb connect failed: %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	if !strings.Contains(strings.ToLower(string(out)), "connected to") && !strings.Contains(strings.ToLower(string(out)), "already connected") {
+	lower := strings.ToLower(string(out))
+	if !strings.Contains(lower, "connected to") && !strings.Contains(lower, "already connected") {
 		return fmt.Errorf("ADB did not confirm connection: %s", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// PairWireless pairs modern Android Wireless debugging and then connects to the
+// separate endpoint shown on the Wireless debugging settings screen.
+func PairWireless(ctx context.Context, pairingEndpoint, pairingCode, connectEndpoint string) error {
+	if err := validateEndpoint(pairingEndpoint); err != nil { return fmt.Errorf("pairing endpoint: %w", err) }
+	if err := validateEndpoint(connectEndpoint); err != nil { return fmt.Errorf("connection endpoint: %w", err) }
+	pairingCode = strings.TrimSpace(pairingCode)
+	if len(pairingCode) != 6 {
+		return fmt.Errorf("pairing code must contain the 6 digits shown by Android")
+	}
+	for _, r := range pairingCode {
+		if r < '0' || r > '9' { return fmt.Errorf("pairing code must contain only digits") }
+	}
+	pairCmd := exec.CommandContext(ctx, "adb", "pair", strings.TrimSpace(pairingEndpoint), pairingCode)
+	pairOut, err := pairCmd.CombinedOutput()
+	if err != nil { return fmt.Errorf("ADB pairing failed: %w: %s", err, strings.TrimSpace(string(pairOut))) }
+	if !strings.Contains(strings.ToLower(string(pairOut)), "successfully paired") {
+		return fmt.Errorf("ADB did not confirm pairing: %s", strings.TrimSpace(string(pairOut)))
+	}
+	connectCmd := exec.CommandContext(ctx, "adb", "connect", strings.TrimSpace(connectEndpoint))
+	connectOut, err := connectCmd.CombinedOutput()
+	if err != nil { return fmt.Errorf("paired, but ADB connect failed: %w: %s", err, strings.TrimSpace(string(connectOut))) }
+	lower := strings.ToLower(string(connectOut))
+	if !strings.Contains(lower, "connected to") && !strings.Contains(lower, "already connected") {
+		return fmt.Errorf("paired, but ADB did not confirm connection: %s", strings.TrimSpace(string(connectOut)))
 	}
 	return nil
 }
