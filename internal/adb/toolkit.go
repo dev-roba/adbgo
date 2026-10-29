@@ -153,8 +153,9 @@ func StreamLogcat(ctx context.Context, serial, priority, packageName string, dst
 	return nil
 }
 
-// StartScreenRecording starts a bounded recording. The caller must stop the
-// process and call Pull for the remote output; duration is capped at 3 minutes.
+// StartScreenRecording starts a bounded recording that exits after the requested
+// duration. The caller should wait for the process and pull the remote output; the
+// duration is capped at 3 minutes.
 func StartScreenRecording(ctx context.Context, serial, remotePath string, seconds int) (*exec.Cmd, error) {
 	if seconds < 1 || seconds > 180 { return nil, fmt.Errorf("recording duration must be between 1 and 180 seconds") }
 	if !strings.HasPrefix(remotePath, "/sdcard/") { return nil, fmt.Errorf("recording path must be under /sdcard") }
