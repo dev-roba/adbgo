@@ -37,6 +37,7 @@ sudo pacman -S zenity
 ```bash
 git clone https://github.com/dev-roba/adbgo.git
 cd adbgo
+go mod tidy
 go test ./...
 go build -o adbgo .
 ./adbgo
