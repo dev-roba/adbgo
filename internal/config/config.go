@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"fmt"
 	"time"
 )
 
@@ -70,7 +71,16 @@ func (c *Config) Save() error {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0600)
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".devices-*.tmp")
+	if err != nil { return err }
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0600); err != nil { _ = tmp.Close(); return err }
+	if _, err := tmp.Write(data); err != nil { _ = tmp.Close(); return err }
+	if err := tmp.Sync(); err != nil { _ = tmp.Close(); return err }
+	if err := tmp.Close(); err != nil { return err }
+	if err := os.Rename(tmpName, path); err != nil { return fmt.Errorf("replace device registry: %w", err) }
+	return nil
 }
 
 func (c *Config) FindBySerial(serial string) *Device {
