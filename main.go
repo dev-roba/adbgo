@@ -31,7 +31,7 @@ func main() {
 			fmt.Println("Run without arguments to open the interactive terminal UI.")
 			return
 		default:
-			fmt.Fprintf(os.Stderr, "unknown argument: %s\\nUse --help for usage.\\n", os.Args[1])
+			fmt.Fprintf(os.Stderr, "unknown argument: %s\nUse --help for usage.\n", os.Args[1])
 			os.Exit(2)
 		}
 	}
