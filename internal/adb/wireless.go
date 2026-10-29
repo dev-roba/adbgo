@@ -65,6 +65,50 @@ func ConnectWireless(serial string) (string, error) {
 	return wirelessSerial, nil
 }
 
+// ConnectDirect connects to an arbitrary IP:port (for Android 11+ wireless debugging).
+func ConnectDirect(ipPort string) error {
+	out, err := RunRaw("connect", ipPort)
+	if err != nil {
+		return err
+	}
+	if strings.Contains(out, "failed to authenticate") || strings.Contains(out, "cannot connect") {
+		return fmt.Errorf("%s", strings.TrimSpace(out))
+	}
+	return nil
+}
+
+// PairWireless pairs with an Android 11+ device using a 6-digit pairing code.
+func PairWireless(ipPort, code string) error {
+	out, err := RunRaw("pair", ipPort, code)
+	if err != nil {
+		return fmt.Errorf("pairing failed: %w\n%s", err, out)
+	}
+	if strings.Contains(out, "Failed") {
+		return fmt.Errorf("pairing failed: %s", strings.TrimSpace(out))
+	}
+	return nil
+}
+
+// DiscoverMDNS checks for wireless debugging targets advertising over mDNS.
+func DiscoverMDNS() ([]string, error) {
+	out, err := RunRaw("mdns", "services")
+	if err != nil {
+		return nil, err
+	}
+	var targets []string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "_adb-tls-connect._tcp") || strings.Contains(line, "_adb._tcp") {
+			parts := strings.Fields(line)
+			if len(parts) >= 3 {
+				// The last column is usually the ip:port
+				targets = append(targets, parts[len(parts)-1])
+			}
+		}
+	}
+	return targets, nil
+}
+
 // DisconnectWireless disconnects a wireless (tcpip) device.
 func DisconnectWireless(serial string) error {
 	_, err := RunRaw("disconnect", serial)

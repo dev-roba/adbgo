@@ -1,99 +1,171 @@
 # adbgo
 
-Fast terminal power tool for ADB: wireless ADB, live logcat, file manager, APK
-sideloading, screen recording, multi-device mode — plus a login system,
-GOD MODE, and nuclear options for devices you own.
+Fast terminal power tool for ADB: dual CLI + interactive TUI, wireless ADB, live logcat, interactive file manager, Split APK sideloading & backup, screen recording, live diagnostics dashboard, multi-device batch mode — plus a device login system, GOD MODE, and nuclear options for devices you own.
 
-Built on Linux (Arch/Omarchy first-class) with Go + [huh](https://github.com/charmbracelet/huh) + [lipgloss](https://github.com/charmbracelet/lipgloss). Works on any Linux/macOS with Go + android-tools.
+Built on Linux (Arch/Omarchy first-class) with Go + [huh](https://github.com/charmbracelet/huh) + [lipgloss](https://github.com/charmbracelet/lipgloss). Works on Linux, macOS, and Windows with Go + `android-tools`.
+
+---
 
 ## Features
 
-- **Login / Signup** system tied to device serial + password (bcrypt, min 8 chars)
-- **Device Management** — rename or remove registered devices, export/import
-- 30-minute session timeout
-- Colorful UI (green normal / red GOD MODE)
-- **scrcpy** integration
-- Device control (reboot, recovery, bootloader, screenshots, wake/lock...)
-- **Wireless ADB** — `adb tcpip 5555` → connect over Wi-Fi, unplug the cable
-- **Live logcat viewer** — filter by package and priority, streamed to your terminal
-- **APK sideload** — file picker + streamed install progress (`adb install -r`)
-- **File manager** — browse `/sdcard`, push/pull, mkdir, delete
-- **Screen recording** — `screenrecord` with auto-pull to your PC when stopped
-- **Multi-device mode** — run actions against several devices at once
-- **GOD MODE** → password-protected, unlocks the full Danger Zone
-- Nuclear options: factory reset, bootloader unlock/lock (waits for fastboot),
-  remove screen lock, FRP attempts, raw adb/fastboot
-- Every dangerous action requires typing `YES` (and the serial for the worst ones)
-- **Self-update** — "Check for Updates" in the main menu downloads the latest GitHub release and swaps the binary in place
+- **Dual-Mode**: Run interactively (TUI) or script via direct CLI commands (`adbgo screenshot`, `adbgo scrcpy`, `adbgo install`).
+- **⚡ Live Device Dashboard**: Real-time battery status (level, health, temperature in °C, voltage, charger source), display resolution & DPI, currently active app/activity, and storage table (`/data`, `/system`).
+- **Wireless ADB**:
+  - `adb tcpip 5555` USB-to-wireless flow (auto-detects phone IP on `wlan0`).
+  - **Android 11+ Pairing**: Pair cable-free with 6-digit pairing code (`adb pair ip:port code`).
+  - **mDNS Discovery**: Scan local Wi-Fi for wireless debugging devices.
+- **APK Power Tools**:
+  - Sideload single APKs or Split APK bundles (`.xapk`, `.apks`, `.zip`) via `adb install-multiple`.
+  - Extract/backup installed APKs from phone directly to PC.
+  - Launch apps, force-stop, clear data/cache, or uninstall.
+- **Interactive File Manager**:
+  - Browse `/sdcard` with push, pull, mkdir, text preview, and deletion.
+  - Use terminal file picker to choose local files to push.
+  - **Photo Sync**: 1-click sync of `/sdcard/DCIM/Camera` photos to PC.
+- **Screen & scrcpy Power Tools**:
+  - **Clean scrcpy Launcher**: SDL/ffmpeg logs run in background (`~/.config/adbgo/scrcpy.log`) so the terminal UI stays pristine.
+  - **High-End Profiles**: Battery Saver (turn screen off & stay awake), Low-Latency Wi-Fi mode (1024p, 4Mbps, 60fps), Ultra Gaming (120fps & H.265), Always-on-Top floating window, Direct MP4 record to PC, and Custom Configuration Builder.
+  - Screenshot capture pulled automatically to PC as PNG.
+  - Screen recording (`screenrecord`) with auto-pull and cleanup upon `Ctrl+C` (gracefully trapped without killing the tool).
+- **Live Logcat Viewer**:
+  - Filter by package PID, log tag, and priority level (V, D, I, W, E, F).
+  - Dump crash buffer (`adb logcat -b crash`).
+- **Developer Utilities**:
+  - Type text/passwords into phone fields with proper space & character escaping.
+  - Clean Demo Mode toggle (sets 12:00 clock, 100% battery, hides notifications for screenshots).
+  - Deep Link tester (`am start -a android.intent.action.VIEW -d <url>`).
+- **Multi-Device Mode**:
+  - Batch wake, lock, reboot, take screenshots, or install APK across multiple connected devices simultaneously.
+- **Security & Registration**:
+  - Device signup/login system tied to serial + bcrypt password hash.
+  - Rename, remove, export, and import registered devices.
+  - 30-minute session inactivity timeout.
+- **GOD MODE ("Danger Zone")**:
+  - Password-protected with strict `YES` + serial confirmation.
+  - Interactive root shell with allocated PTY (`adb shell -t su`) or `adb root`.
+  - Fastboot bootloader unlock/lock with auto-wait detection.
+  - Factory reset, cache wipe, and raw command passthrough.
+- **In-App Self Updater**:
+  - Checks GitHub Releases, downloads asset for your OS/Arch, and replaces the binary in-place.
+
+---
 
 ## Requirements
 
 ```bash
-# Arch / Omarchy
+# Arch Linux / Omarchy
 sudo pacman -S go android-tools scrcpy
 
 # Debian / Ubuntu
 sudo apt install golang-go adb scrcpy
+
+# Fedora
+sudo dnf install golang android-tools scrcpy
+
+# macOS (Homebrew)
+brew install go android-platform-tools scrcpy
 ```
+
+---
 
 ## Install
 
-Grab a prebuilt binary from [Releases](https://github.com/dev-roba/adbgo/releases),
-or build from source:
-
+### Option 1: `go install` (Recommended)
 ```bash
-git clone https://github.com/dev-roba/adbgo
+go install github.com/dev-roba/adbgo@latest
+```
+
+### Option 2: Prebuilt Binary
+Grab the latest release archive from [GitHub Releases](https://github.com/dev-roba/adbgo/releases), extract, and copy `adbgo` to your `PATH` (e.g. `~/.local/bin/`).
+
+### Option 3: Build from source
+```bash
+git clone https://github.com/dev-roba/adbgo.git
 cd adbgo
 go build -o adbgo .
+cp adbgo ~/.local/bin/
 ```
 
-Optional:
-
-```bash
-cp adbgo ~/.local/bin/   # or any directory in your PATH
-```
+---
 
 ## Usage
 
+### Interactive TUI Mode
+Run `adbgo` without any arguments:
 ```bash
-./adbgo
+adbgo
 ```
+- **First time**: Select **Signup** $\to$ pick your connected device from `adb devices` $\to$ set a password (min 8 characters).
+- **Subsequent runs**: Select **Login** $\to$ choose your registered device.
 
-First time → Signup → select your device from `adb devices` → set a password (8+ chars).
-
-Next times → Login with the registered device.
-
-### Wireless ADB (recommended QoL)
-
-Connect your phone over USB once → **File & System → Wireless ADB → Connect**.
-adbgo enables tcpip mode, finds the phone's Wi-Fi IP and connects. You can then
-unplug the cable and keep using scrcpy, logcat and file transfer over Wi-Fi.
-Register the wireless serial (`ip:5555`) via Signup to log in without a cable at all.
-
-## Config location
-
-`~/.config/adbgo/devices.json`
-
-You can copy this file to move your registered devices to another machine
-(or use the built-in Export/Import).
-
-## Development
+### CLI Direct Mode
+Use `adbgo` directly from your shell, terminal scripts, or keybindings:
 
 ```bash
-go test ./...   # unit tests
-go vet ./...    # static checks (CI runs gofmt + vet + build + test)
+# List all connected devices
+adbgo devices
+
+# Open live hardware & system dashboard
+adbgo dashboard
+adbgo dashboard -s <serial>
+
+# Launch scrcpy mirror
+adbgo scrcpy
+
+# Capture screenshot to local directory
+adbgo screenshot
+
+# Record screen (Ctrl+C to stop, pulls rec-*.mp4 to current directory)
+adbgo record
+
+# Install APK or split bundle (.xapk / .apks)
+adbgo install app.apk
+adbgo install -d update_bundle.xapk
+
+# Stream live logcat filtered by package
+adbgo logcat -p com.example.app -l W
+
+# Wireless ADB shortcuts
+adbgo wireless connect              # Switch USB device to tcpip 5555 and connect
+adbgo wireless pair 192.168.1.50:37281 123456 # Pair Android 11+
+adbgo wireless scan                 # Scan local network for mDNS wireless devices
+adbgo wireless disconnect 192.168.1.50:5555
+
+# Open interactive shell
+adbgo shell
+
+# Check for updates and self-update
+adbgo update
 ```
 
-Releases are cut with GoReleaser — push a `v*` tag and GitHub Actions
-publishes binaries for Linux, macOS and Windows (amd64 + arm64).
-In-app: **Main Menu → Check for Updates** downloads the latest release for
-your OS/arch and replaces the running binary (restart adbgo after).
+---
 
-## Warning
+## Configuration & Storage
 
-GOD MODE contains extremely dangerous commands that can wipe your device,
-unlock the bootloader (which itself wipes data), or soft-brick the phone if
-used incorrectly. Use only on devices you own and understand.
+Registered devices, friendly names, and bcrypt password hashes are stored in:
+```
+~/.config/adbgo/devices.json
+```
+Use **Auth Menu $\to$ Export Devices** to backup or transfer registrations between machines.
+
+---
+
+## Development & Testing
+
+```bash
+# Run unit tests
+go test -v ./...
+
+# Run static analysis
+go vet ./...
+
+# Check code formatting
+gofmt -l .
+```
+
+Releases are automatically published via GoReleaser on every git tag (`v*`).
+
+---
 
 ## License
 

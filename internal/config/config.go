@@ -8,10 +8,11 @@ import (
 )
 
 type Device struct {
-	Serial   string    `json:"serial"`
-	Name     string    `json:"name"`
-	Password string    `json:"password"` // bcrypt hash
-	Created  time.Time `json:"created"`
+	Serial         string    `json:"serial"`
+	Name           string    `json:"name"`
+	Password       string    `json:"password"`                  // bcrypt hash for GOD MODE
+	UnlockPassword string    `json:"unlock_password,omitempty"` // Phone lockscreen password/PIN
+	Created        time.Time `json:"created"`
 }
 
 type Config struct {

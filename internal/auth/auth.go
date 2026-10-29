@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"adbgo/internal/config"
+	"github.com/dev-roba/adbgo/internal/config"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -67,10 +67,11 @@ func Signup(cfg *config.Config, serial, name, password string) (*Session, error)
 	}
 
 	dev := config.Device{
-		Serial:   serial,
-		Name:     name,
-		Password: hash,
-		Created:  time.Now(),
+		Serial:         serial,
+		Name:           name,
+		Password:       hash,
+		UnlockPassword: password,
+		Created:        time.Now(),
 	}
 
 	cfg.AddDevice(dev)
@@ -80,6 +81,20 @@ func Signup(cfg *config.Config, serial, name, password string) (*Session, error)
 
 	return &Session{
 		Device:     cfg.FindBySerial(serial),
+		LoggedInAt: time.Now(),
+		GodMode:    false,
+	}, nil
+}
+
+// LoginWithoutPassword creates an authenticated session directly without asking for a password.
+func LoginWithoutPassword(cfg *config.Config, serial string) (*Session, error) {
+	dev := cfg.FindBySerial(serial)
+	if dev == nil {
+		return nil, fmt.Errorf("device not registered")
+	}
+
+	return &Session{
+		Device:     dev,
 		LoggedInAt: time.Now(),
 		GodMode:    false,
 	}, nil
