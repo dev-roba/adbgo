@@ -1,0 +1,84 @@
+package auth
+
+import (
+	"fmt"
+	"time"
+
+	"adbgo/internal/config"
+	"golang.org/x/crypto/bcrypt"
+)
+
+const SessionTimeout = 30 * time.Minute
+
+type Session struct {
+	Device     *config.Device
+	LoggedInAt time.Time
+	GodMode    bool
+}
+
+func (s *Session) IsExpired() bool {
+	return time.Since(s.LoggedInAt) > SessionTimeout
+}
+
+func (s *Session) Refresh() {
+	s.LoggedInAt = time.Now()
+}
+
+func HashPassword(password string) (string, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	return string(hash), nil
+}
+
+func CheckPassword(hash, password string) bool {
+	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+	return err == nil
+}
+
+func Signup(cfg *config.Config, serial, name, password string) (*Session, error) {
+	if name == "" {
+		name = serial
+	}
+
+	hash, err := HashPassword(password)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash password: %w", err)
+	}
+
+	dev := config.Device{
+		Serial:   serial,
+		Name:     name,
+		Password: hash,
+		Created:  time.Now(),
+	}
+
+	cfg.AddDevice(dev)
+	if err := cfg.Save(); err != nil {
+		return nil, fmt.Errorf("failed to save config: %w", err)
+	}
+
+	return &Session{
+		Device:     &dev,
+		LoggedInAt: time.Now(),
+		GodMode:    false,
+	}, nil
+}
+
+func Login(cfg *config.Config, serial, password string) (*Session, error) {
+	dev := cfg.FindBySerial(serial)
+	if dev == nil {
+		return nil, fmt.Errorf("device not registered")
+	}
+
+	if !CheckPassword(dev.Password, password) {
+		return nil, fmt.Errorf("incorrect password")
+	}
+
+	return &Session{
+		Device:     dev,
+		LoggedInAt: time.Now(),
+		GodMode:    false,
+	}, nil
+}
