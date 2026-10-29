@@ -610,14 +610,15 @@ func showLogcat(session *auth.Session) {
 func installAPK(session *auth.Session) {
 	path := pickLocalFile("Select APK to install")
 	if path == "" { ui.PrintWarning("No APK selected."); return }
+	if !strings.HasSuffix(strings.ToLower(path), ".apk") { ui.PrintError("Select a file ending in .apk"); ui.Pause(); return }
 	var confirm string
 	// Installation can replace an existing package; require a typed confirmation.
 	fmt.Print("Type INSTALL to install this APK on "+session.Device.Serial+": ")
 	if _, err := fmt.Scanln(&confirm); err != nil || confirm != "INSTALL" { ui.PrintWarning("Cancelled."); return }
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute); defer cancel()
-	out, err := adb.InstallAPK(ctx, session.Device.Serial, path)
-	fmt.Println(out)
-	if err != nil { ui.PrintError(err.Error()) } else { ui.PrintSuccess("APK installed successfully.") }
+	cmd := exec.CommandContext(ctx, "adb", "-s", session.Device.Serial, "install", "-r", path)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil { ui.PrintError("APK installation failed: "+err.Error()) } else { ui.PrintSuccess("APK installation completed.") }
 	ui.Pause()
 }
 
