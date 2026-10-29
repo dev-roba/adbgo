@@ -2,6 +2,7 @@ package adb
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -81,13 +82,9 @@ func IsConnected(serial string) bool {
 
 // Run runs an adb command for a specific device and returns combined output
 func Run(serial string, args ...string) (string, error) {
-	fullArgs := append([]string{"-s", serial}, args...)
-	cmd := exec.Command("adb", fullArgs...)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-	err := cmd.Run()
-	return out.String(), err
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	return RunContext(ctx, serial, args...)
 }
 
 // StartScrcpy launches scrcpy for the device (blocking until scrcpy exits)
