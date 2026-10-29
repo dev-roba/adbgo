@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"strings"
 	"strconv"
-	"time"
 )
 
 // RunContext executes one device-scoped ADB command with a timeout. It returns
@@ -60,6 +59,9 @@ func ConnectTCPIP(ctx context.Context, serial, hostPort string) error {
 // InstallAPK installs an APK and returns ADB's output. Android package
 // installation can replace an existing package; the caller should confirm first.
 func InstallAPK(ctx context.Context, serial, path string) (string, error) {
+	if strings.TrimSpace(serial) == "" {
+		return "", fmt.Errorf("device serial is required")
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return "", fmt.Errorf("cannot access APK: %w", err)
@@ -67,7 +69,17 @@ func InstallAPK(ctx context.Context, serial, path string) (string, error) {
 	if info.IsDir() || !strings.HasSuffix(strings.ToLower(path), ".apk") {
 		return "", fmt.Errorf("choose a .apk file")
 	}
-	return RunContext(ctx, serial, "install", "-r", path)
+	cmd := exec.CommandContext(ctx, "adb", "-s", serial, "install", "-r", path)
+	var output bytes.Buffer
+	writer := io.MultiWriter(&output, os.Stdout)
+	cmd.Stdout, cmd.Stderr = writer, writer
+	if err := cmd.Run(); err != nil {
+		return output.String(), fmt.Errorf("APK installation failed: %w", err)
+	}
+	if !strings.Contains(strings.ToLower(output.String()), "success") {
+		return output.String(), fmt.Errorf("ADB did not confirm APK installation")
+	}
+	return output.String(), nil
 }
 
 // Push and Pull transfer a file and verify the local side where possible.
@@ -160,4 +172,3 @@ func DeviceShell(serial string, stdin io.Reader, stdout, stderr io.Writer) error
 	return cmd.Run()
 }
 
-var DefaultTimeout = 45 * time.Second
