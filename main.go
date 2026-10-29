@@ -378,7 +378,7 @@ func showDeviceControl(session *auth.Session) {
 				Value(&choice),
 		),
 	)
-	form.Run()
+	if err := form.Run(); err != nil { return }
 
 	serial := session.Device.Serial
 	var err error
@@ -475,7 +475,7 @@ func showFileSystem(session *auth.Session) {
 				Value(&choice),
 		),
 	)
-	form.Run()
+	if err := form.Run(); err != nil { return }
 
 	serial := session.Device.Serial
 	switch choice {
@@ -485,9 +485,10 @@ func showFileSystem(session *auth.Session) {
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		cmd.Run()
+		if err := cmd.Run(); err != nil { ui.PrintError("Shell exited: " + err.Error()) }
 	case "info":
-		out, _ := adb.Run(serial, "shell", "getprop")
+		out, err := adb.Run(serial, "shell", "getprop")
+		if err != nil { ui.PrintError("Could not read device properties: " + err.Error()); ui.Pause(); return }
 		// Print only interesting props
 		interesting := []string{"ro.product.model", "ro.build.version.release", "ro.serialno", "ro.product.manufacturer"}
 		for _, line := range strings.Split(out, "\n") {
@@ -520,7 +521,7 @@ func showDangerZone(session *auth.Session) {
 				Value(&choice),
 		),
 	)
-	form.Run()
+	if err := form.Run(); err != nil { return }
 
 	serial := session.Device.Serial
 	var err error
