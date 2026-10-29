@@ -423,38 +423,42 @@ func showAppManagement(session *auth.Session) {
 				Value(&choice),
 		),
 	)
-	form.Run()
+	if err := form.Run(); err != nil || choice == "back" { return }
 
 	serial := session.Device.Serial
 	switch choice {
-	case "list_user":
-		out, _ := adb.Run(serial, "shell", "pm", "list", "packages", "-3")
-		fmt.Println(out)
-	case "list_all":
-		out, _ := adb.Run(serial, "shell", "pm", "list", "packages")
-		fmt.Println(out)
+	case "list_user", "list_all":
+		args := []string{"shell", "pm", "list", "packages"}
+		if choice == "list_user" { args = append(args, "-3") }
+		out, err := adb.Run(serial, args...)
+		if err != nil { ui.PrintError("Could not list packages: " + err.Error()) } else { fmt.Println(out) }
 	case "force_stop", "clear", "uninstall":
-		fmt.Print("Enter package name: ")
 		var pkg string
-		fmt.Scanln(&pkg)
-		if pkg == "" {
+		form := huh.NewForm(huh.NewGroup(huh.NewInput().Title("Android package name").Placeholder("com.example.app").Value(&pkg)))
+		if err := form.Run(); err != nil { return }
+		pkg = strings.TrimSpace(pkg)
+		if pkg == "" || strings.ContainsAny(pkg, " \t\r\n") || strings.HasPrefix(pkg, "-") {
+			ui.PrintError("Enter a valid package name.")
+			ui.Pause()
 			return
 		}
-		switch choice {
-		case "force_stop":
-			adb.Run(serial, "shell", "am", "force-stop", pkg)
-			ui.PrintSuccess("Force-stopped " + pkg)
-		case "clear":
-			adb.Run(serial, "shell", "pm", "clear", pkg)
-			ui.PrintSuccess("Cleared data for " + pkg)
-		case "uninstall":
-			adb.Run(serial, "uninstall", pkg)
-			ui.PrintSuccess("Uninstalled " + pkg)
+		if choice == "clear" || choice == "uninstall" {
+			verb := "clear all app data for"
+			if choice == "uninstall" { verb = "uninstall" }
+			var confirmed bool
+			form = huh.NewForm(huh.NewGroup(huh.NewConfirm().Title(fmt.Sprintf("Are you sure you want to %s %s on %s?", verb, pkg, serial)).Affirmative("Continue").Negative("Cancel").Value(&confirmed)))
+			if err := form.Run(); err != nil || !confirmed { ui.PrintWarning("Cancelled."); return }
 		}
+		var args []string
+		switch choice {
+		case "force_stop": args = []string{"shell", "am", "force-stop", pkg}
+		case "clear": args = []string{"shell", "pm", "clear", pkg}
+		case "uninstall": args = []string{"uninstall", pkg}
+		}
+		out, err := adb.Run(serial, args...)
+		if err != nil { ui.PrintError("App operation failed: " + err.Error()) } else { fmt.Println(out); ui.PrintSuccess("ADB completed the requested app operation.") }
 	}
-	if choice != "back" {
-		ui.Pause()
-	}
+	ui.Pause()
 }
 
 func showFileSystem(session *auth.Session) {
