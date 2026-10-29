@@ -379,28 +379,29 @@ func showDeviceControl(session *auth.Session) {
 	form.Run()
 
 	serial := session.Device.Serial
+	var err error
 	switch choice {
 	case "reboot":
-		adb.Reboot(serial, "")
-		ui.PrintSuccess("Reboot command sent")
+		err = adb.Reboot(serial, "")
 	case "recovery":
-		adb.Reboot(serial, "recovery")
-		ui.PrintSuccess("Rebooting to recovery")
+		err = adb.Reboot(serial, "recovery")
 	case "bootloader":
-		adb.Reboot(serial, "bootloader")
-		ui.PrintSuccess("Rebooting to bootloader")
+		err = adb.Reboot(serial, "bootloader")
 	case "poweroff":
-		adb.Run(serial, "shell", "reboot", "-p")
-		ui.PrintSuccess("Power off command sent")
+		_, err = adb.Run(serial, "shell", "reboot", "-p")
 	case "screenshot":
 		filename := fmt.Sprintf("screenshot-%s.png", time.Now().Format("20060102-150405"))
-		adb.Run(serial, "shell", "screencap", "-p", "/sdcard/"+filename)
-		adb.Run(serial, "pull", "/sdcard/"+filename, filename)
-		ui.PrintSuccess("Screenshot saved as " + filename)
+		remote := "/sdcard/" + filename
+		_, err = adb.Run(serial, "shell", "screencap", "-p", remote)
+		if err == nil {
+			_, err = adb.Pull(context.Background(), serial, remote, filename)
+		}
+		if err == nil { ui.PrintSuccess("Screenshot saved as " + filename) }
 	}
-	if choice != "back" {
-		ui.Pause()
+	if err != nil { ui.PrintError("Device operation failed: " + err.Error()) } else if choice != "back" && choice != "" && choice != "screenshot" {
+		ui.PrintSuccess("Command sent to " + serial)
 	}
+	if choice != "back" { ui.Pause() }
 }
 
 func showAppManagement(session *auth.Session) {
