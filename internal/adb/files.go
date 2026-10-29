@@ -4,35 +4,60 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
+	"path/filepath"
 	"strings"
 	"time"
 )
 
 // RecordScreen records the device screen with `screenrecord` in the
-// background. When the user presses Ctrl+C the recording is pulled from the
-// device into the current directory and removed from /sdcard.
+// background. When the user presses Ctrl+C, SIGINT is trapped so adbgo doesn't
+// exit; the recording is pulled to local disk and removed from /sdcard.
 func RecordScreen(serial string) (string, error) {
 	timestamp := time.Now().Format("20060102-150405")
 	remote := fmt.Sprintf("/sdcard/adbgo-rec-%s.mp4", timestamp)
-	local := fmt.Sprintf("rec-%s.mp4", timestamp)
+	local := fmt.Sprintf("rec-%s-%s.mp4", sanitize(serial), timestamp)
 
-	fmt.Println("Recording... press Ctrl+C to stop (max 3 minutes).")
+	fmt.Println("Recording screen... press Ctrl+C to stop (max 3 minutes).")
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt)
+	defer signal.Stop(sigChan)
 
 	cmd := exec.Command("adb", "-s", serial, "shell", "screenrecord", "--time-limit", "180", remote)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	err := cmd.Run()
-	// Ctrl+C kills screenrecord too — treat interrupt as a normal stop
-	if err != nil && !strings.Contains(err.Error(), "signal: interrupt") {
-		return "", fmt.Errorf("screenrecord failed: %w", err)
+
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("screenrecord failed to start: %w", err)
 	}
 
-	// Give adbd a moment to close the file
-	time.Sleep(500 * time.Millisecond)
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	select {
+	case <-sigChan:
+		fmt.Println("\nStopping screen recording...")
+		_ = cmd.Process.Signal(os.Interrupt)
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			_ = cmd.Process.Kill()
+		}
+	case err := <-done:
+		if err != nil && !strings.Contains(err.Error(), "signal: interrupt") {
+			return "", fmt.Errorf("screenrecord failed: %w", err)
+		}
+	}
+
+	// Give adbd a moment to finalize and flush the video file
+	time.Sleep(800 * time.Millisecond)
 
 	fmt.Println("Pulling recording to", local)
 	if _, err := Run(serial, "pull", remote, local); err != nil {
-		return "", fmt.Errorf("recording saved on device at %s but the pull failed: %w", remote, err)
+		return "", fmt.Errorf("recording saved on device at %s but pull failed: %w", remote, err)
 	}
 	Run(serial, "shell", "rm", remote)
 	return local, nil
@@ -42,10 +67,10 @@ func RecordScreen(serial string) (string, error) {
 type FileEntry struct {
 	Name  string
 	IsDir bool
+	Size  string
 }
 
-// ListRemoteDir lists a directory on the device using `ls -1p`
-// (directories end with "/").
+// ListRemoteDir lists a directory on the device using `ls -1pa`
 func ListRemoteDir(serial, path string) ([]FileEntry, error) {
 	out, err := Run(serial, "shell", "ls", "-1p", path)
 	if err != nil {
@@ -54,7 +79,7 @@ func ListRemoteDir(serial, path string) ([]FileEntry, error) {
 	var entries []FileEntry
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimRight(strings.TrimSpace(line), "\r")
-		if line == "" {
+		if line == "" || line == "./" || line == "../" {
 			continue
 		}
 		isDir := strings.HasSuffix(line, "/")
@@ -65,6 +90,15 @@ func ListRemoteDir(serial, path string) ([]FileEntry, error) {
 		entries = append(entries, FileEntry{Name: name, IsDir: isDir})
 	}
 	return entries, nil
+}
+
+// ReadRemoteFile reads the beginning of a remote text file for previewing.
+func ReadRemoteFile(serial, remotePath string, maxLines int) (string, error) {
+	out, err := Run(serial, "shell", "head", "-n", fmt.Sprint(maxLines), remotePath)
+	if err != nil {
+		return "", err
+	}
+	return out, nil
 }
 
 // Pull downloads a remote file/folder into the current directory.
@@ -98,29 +132,24 @@ func RemoteMkdir(serial, remotePath string) error {
 	return err
 }
 
-// InstallAPK installs an APK (or an .apkm/.apks bundle via --adb) with
-// streamed output so the user sees live progress.
-func InstallAPK(serial, apkPath string, allowDowngrade bool) error {
-	args := []string{"install", "-r"}
-	if allowDowngrade {
-		args = append(args, "-d")
+// SyncPhotos pulls new photos from /sdcard/DCIM/Camera to local folder.
+func SyncPhotos(serial, localDest string) (string, error) {
+	if localDest == "" {
+		localDest = fmt.Sprintf("photos-%s", sanitize(serial))
 	}
-	args = append(args, apkPath)
-	return RunStreaming(serial, args...)
-}
-
-// UserPackages returns the list of installed third-party package names.
-func UserPackages(serial string) ([]string, error) {
-	out, err := Run(serial, "shell", "pm", "list", "packages", "-3")
+	if err := os.MkdirAll(localDest, 0o755); err != nil {
+		return "", err
+	}
+	// Pull only Camera directory
+	remote := "/sdcard/DCIM/Camera"
+	out, err := Run(serial, "pull", remote, filepath.Join(localDest, "Camera"))
 	if err != nil {
-		return nil, err
-	}
-	var pkgs []string
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "package:") {
-			pkgs = append(pkgs, strings.TrimPrefix(line, "package:"))
+		// Fallback to /sdcard/DCIM
+		remote = "/sdcard/DCIM"
+		out, err = Run(serial, "pull", remote, localDest)
+		if err != nil {
+			return out, err
 		}
 	}
-	return pkgs, nil
+	return localDest, nil
 }

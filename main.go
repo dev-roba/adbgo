@@ -9,12 +9,13 @@ import (
 	"strings"
 	"time"
 
-	"adbgo/internal/adb"
-	"adbgo/internal/auth"
-	"adbgo/internal/config"
-	"adbgo/internal/danger"
-	"adbgo/internal/ui"
-	"adbgo/internal/update"
+	"github.com/dev-roba/adbgo/internal/adb"
+	"github.com/dev-roba/adbgo/internal/auth"
+	"github.com/dev-roba/adbgo/internal/cli"
+	"github.com/dev-roba/adbgo/internal/config"
+	"github.com/dev-roba/adbgo/internal/danger"
+	"github.com/dev-roba/adbgo/internal/ui"
+	"github.com/dev-roba/adbgo/internal/update"
 
 	"github.com/charmbracelet/huh"
 )
@@ -28,6 +29,11 @@ func main() {
 	if _, err := exec.LookPath("adb"); err != nil {
 		ui.PrintError("adb not found in PATH. Install android-tools first.")
 		os.Exit(1)
+	}
+
+	// Dispatch CLI subcommands if arguments were passed
+	if cli.HandleCLI(version) {
+		return
 	}
 
 	cfg, err := config.Load()
@@ -69,9 +75,11 @@ func showAuthMenu(cfg *config.Config) *auth.Session {
 				Options(
 					huh.NewOption("Login", "login"),
 					huh.NewOption("Signup (register new device)", "signup"),
+					huh.NewOption("📶 Wireless ADB (connect over Wi-Fi / pair)", "wireless"),
 					huh.NewOption("Device Management (rename / remove)", "manage"),
 					huh.NewOption("Export devices", "export"),
 					huh.NewOption("Import devices", "import"),
+					huh.NewOption("🔄 Check for Updates", "update"),
 					huh.NewOption("Exit", "exit"),
 				).
 				Value(&choice),
@@ -87,6 +95,9 @@ func showAuthMenu(cfg *config.Config) *auth.Session {
 		return doLogin(cfg)
 	case "signup":
 		return doSignup(cfg)
+	case "wireless":
+		wirelessFlow("")
+		return showAuthMenu(cfg)
 	case "manage":
 		showDeviceManagement(cfg)
 		return showAuthMenu(cfg)
@@ -95,6 +106,9 @@ func showAuthMenu(cfg *config.Config) *auth.Session {
 		return showAuthMenu(cfg)
 	case "import":
 		doImport(cfg)
+		return showAuthMenu(cfg)
+	case "update":
+		checkForUpdates()
 		return showAuthMenu(cfg)
 	default:
 		return nil
@@ -201,42 +215,38 @@ func doLogin(cfg *config.Config) *auth.Session {
 		return nil
 	}
 
-	options := make([]huh.Option[string], len(connected))
-	for i, d := range connected {
-		options[i] = huh.NewOption(fmt.Sprintf("%s (%s)", d.Name, d.Serial), d.Serial)
-	}
-
 	var selectedSerial string
-	var password string
+	if len(connected) == 1 {
+		selectedSerial = connected[0].Serial
+	} else {
+		options := make([]huh.Option[string], len(connected))
+		for i, d := range connected {
+			options[i] = huh.NewOption(fmt.Sprintf("%s (%s)", d.Name, d.Serial), d.Serial)
+		}
 
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Select device").
-				Options(options...).
-				Value(&selectedSerial),
-			huh.NewInput().
-				Title("Password").
-				EchoMode(huh.EchoModePassword).
-				Value(&password),
-		),
-	)
+		form := huh.NewForm(
+			huh.NewGroup(
+				huh.NewSelect[string]().
+					Title("Select connected device").
+					Options(options...).
+					Value(&selectedSerial),
+			),
+		)
 
-	if err := form.Run(); err != nil {
-		return nil
+		if err := form.Run(); err != nil || selectedSerial == "" {
+			return nil
+		}
 	}
 
-	session, err := auth.Login(cfg, selectedSerial, password)
+	session, err := auth.LoginWithoutPassword(cfg, selectedSerial)
 	if err != nil {
 		ui.PrintError(err.Error())
-		// Small delay to slow down brute-force attempts
-		time.Sleep(1 * time.Second)
 		ui.Pause()
 		return nil
 	}
 
-	ui.PrintSuccess("Logged in successfully!")
-	time.Sleep(600 * time.Millisecond)
+	ui.PrintSuccess(fmt.Sprintf("Logged in as '%s' (%s)!", session.Device.Name, session.Device.Serial))
+	time.Sleep(500 * time.Millisecond)
 	return session
 }
 
@@ -251,11 +261,15 @@ func showMainMenu(cfg *config.Config, session *auth.Session) {
 		var choice string
 
 		options := []huh.Option[string]{
-			huh.NewOption("Start scrcpy", "scrcpy"),
-			huh.NewOption("Device Control", "device"),
-			huh.NewOption("App Management", "apps"),
-			huh.NewOption("File & System (shell, logcat, files, wireless)", "files"),
-			huh.NewOption("Multi-Device Mode", "multi"),
+			huh.NewOption("🔓 Unlock Phone (wake, swipe & enter PIN)", "unlock_phone"),
+			huh.NewOption("🔒 Lock Phone (turn screen off)", "lock_phone"),
+			huh.NewOption("⚡ Device Dashboard (battery, specs, storage)", "dashboard"),
+			huh.NewOption("📱 Start scrcpy (mirror & control)", "scrcpy"),
+			huh.NewOption("📶 Wireless ADB (connect Wi-Fi, pairing, mDNS)", "wireless"),
+			huh.NewOption("🎮 Device Control (screen, reboot, typing)", "device"),
+			huh.NewOption("📦 App Management (install, extract, freeze)", "apps"),
+			huh.NewOption("📂 File & System (files, photo sync, logcat)", "files"),
+			huh.NewOption("👥 Multi-Device Mode", "multi"),
 		}
 
 		if session.GodMode {
@@ -268,8 +282,8 @@ func showMainMenu(cfg *config.Config, session *auth.Session) {
 		}
 
 		options = append(options,
+			huh.NewOption("🔄 Check for Updates", "update"),
 			huh.NewOption("Logout", "logout"),
-			huh.NewOption("Check for Updates", "update"),
 			huh.NewOption("Exit", "exit"),
 		)
 
@@ -289,16 +303,29 @@ func showMainMenu(cfg *config.Config, session *auth.Session) {
 		session.Refresh()
 
 		switch choice {
-		case "scrcpy":
-			ui.PrintSuccess("Launching scrcpy...")
-			if err := adb.StartScrcpy(session.Device.Serial); err != nil {
-				ui.PrintError("scrcpy failed: " + err.Error())
-				ui.PrintWarning("Is scrcpy installed? (pacman -S scrcpy / apt install scrcpy)")
+		case "unlock_phone":
+			unlockDeviceFlow(cfg, session)
+
+		case "lock_phone":
+			ui.PrintInfo("Locking device (switching screen off)...")
+			if err := adb.LockScreen(session.Device.Serial); err != nil {
+				ui.PrintError("Lock failed: " + err.Error())
+			} else {
+				ui.PrintSuccess("Screen turned off (phone locked)!")
 			}
-			ui.Pause()
+			time.Sleep(700 * time.Millisecond)
+
+		case "dashboard":
+			showDashboard(session)
+
+		case "scrcpy":
+			showScrcpyMenu(session)
+
+		case "wireless":
+			wirelessFlow(session.Device.Serial)
 
 		case "device":
-			showDeviceControl(session)
+			showDeviceControl(cfg, session)
 
 		case "apps":
 			showAppManagement(session)
@@ -333,8 +360,236 @@ func showMainMenu(cfg *config.Config, session *auth.Session) {
 	}
 }
 
-// checkForUpdates compares the running version with the latest GitHub
-// release and offers a one-shot self-update.
+func showDashboard(session *auth.Session) {
+	serial := session.Device.Serial
+	ui.ClearScreen()
+	fmt.Println(ui.TitleStyle.Render("⚡ Live Device Dashboard — " + session.Device.Name))
+	fmt.Println()
+
+	// Battery
+	batt, err := adb.GetBatteryInfo(serial)
+	if err == nil {
+		fmt.Printf("%s  %d%%  (%s, %.1f°C, %.2fV, Source: %s)\n",
+			ui.Highlight.Render("Battery:    "),
+			batt.Level,
+			batt.Status,
+			batt.Temperature,
+			batt.Voltage,
+			batt.PowerSource,
+		)
+	}
+
+	// Display
+	size, density, _ := adb.GetDisplaySpecs(serial)
+	if size != "" {
+		fmt.Printf("%s  %s @ %s dpi\n", ui.Highlight.Render("Display:    "), size, density)
+	}
+
+	// Focused App
+	focus := adb.GetCurrentFocus(serial)
+	fmt.Printf("%s  %s\n", ui.Highlight.Render("Active App: "), focus)
+
+	// OS Info
+	rel, _ := adb.Run(serial, "shell", "getprop", "ro.build.version.release")
+	sdk, _ := adb.Run(serial, "shell", "getprop", "ro.build.version.sdk")
+	patch, _ := adb.Run(serial, "shell", "getprop", "ro.build.version.security_patch")
+	fmt.Printf("%s  Android %s (SDK %s) — Security patch: %s\n",
+		ui.Highlight.Render("Android OS: "),
+		strings.TrimSpace(rel),
+		strings.TrimSpace(sdk),
+		strings.TrimSpace(patch),
+	)
+
+	// Storage
+	storage, err := adb.GetStorageInfo(serial)
+	if err == nil && len(storage) > 0 {
+		fmt.Println("\n" + ui.Highlight.Render("Storage Partitions:"))
+		fmt.Printf("  %-12s %-10s %-10s %-10s %s\n", "MOUNT", "TOTAL", "USED", "FREE", "USE%")
+		for _, s := range storage {
+			fmt.Printf("  %-12s %-10s %-10s %-10s %s\n", s.MountedOn, s.Size, s.Used, s.Avail, s.UsePercent)
+		}
+	}
+	fmt.Println()
+	ui.Pause()
+}
+
+func showScrcpyMenu(session *auth.Session) {
+	serial := session.Device.Serial
+
+	var profileChoice string
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("📱 scrcpy Power Menu — "+session.Device.Name).
+				Options(
+					huh.NewOption("🚀 Standard Mirror (default settings)", "standard"),
+					huh.NewOption("🔋 Battery Saver (Turn phone screen off & stay awake)", "screen_off"),
+					huh.NewOption("⚡ Low-Latency Wi-Fi Mode (1024p, 4M bitrate, 60 FPS)", "wifi"),
+					huh.NewOption("🎮 Ultra Gaming Mode (120 FPS & H.265 codec)", "gaming"),
+					huh.NewOption("📌 Always-On-Top Floating Window", "always_on_top"),
+					huh.NewOption("🎥 Direct Screen Record to PC (.mp4)", "record"),
+					huh.NewOption("🔊 Audio Forwarding (Duplicate to PC & Phone)", "audio_dup"),
+					huh.NewOption("⌨️ HID Keyboard & Mouse (OTG hardware emulation)", "hid"),
+					huh.NewOption("🛠️ Custom Configuration Builder", "custom"),
+					huh.NewOption("Back", "back"),
+				).
+				Value(&profileChoice),
+		),
+	)
+	if err := form.Run(); err != nil || profileChoice == "back" || profileChoice == "" {
+		return
+	}
+
+	var profile adb.ScrcpyProfile
+	switch profileChoice {
+	case "standard":
+		profile = adb.ScrcpyProfile{Name: "Standard"}
+
+	case "screen_off":
+		profile = adb.ScrcpyProfile{
+			Name:          "Battery Saver (Screen Off)",
+			TurnScreenOff: true,
+			StayAwake:     true,
+		}
+
+	case "wifi":
+		profile = adb.ScrcpyProfile{
+			Name:     "Low-Latency Wi-Fi",
+			MaxSize:  1024,
+			BitRateM: 4,
+			MaxFPS:   60,
+		}
+
+	case "gaming":
+		profile = adb.ScrcpyProfile{
+			Name:      "Ultra Gaming (120 FPS)",
+			MaxFPS:    120,
+			BitRateM:  16,
+			Codec:     "h265",
+			StayAwake: true,
+		}
+
+	case "always_on_top":
+		profile = adb.ScrcpyProfile{
+			Name:        "Always on Top",
+			AlwaysOnTop: true,
+		}
+
+	case "record":
+		profile = adb.ScrcpyProfile{
+			Name:       "Direct PC Record",
+			RecordToPC: true,
+		}
+
+	case "audio_dup":
+		profile = adb.ScrcpyProfile{
+			Name:     "Audio Duplicate",
+			AudioDup: true,
+		}
+
+	case "hid":
+		profile = adb.ScrcpyProfile{
+			Name:      "HID Keyboard & Mouse",
+			ExtraArgs: []string{"--keyboard=uhid", "--mouse=uhid"},
+		}
+
+	case "custom":
+		profile = buildCustomScrcpyProfile()
+		if profile.Name == "" {
+			return
+		}
+	}
+
+	ui.ClearScreen()
+	banner := ui.NormalBanner.Render(fmt.Sprintf("📱 scrcpy active: %s", profile.Name))
+	fmt.Println(banner)
+	fmt.Printf("%s %s (%s)\n", ui.DimStyle.Render("Target:"), session.Device.Name, serial)
+	fmt.Println(ui.DimStyle.Render("Logs redirected to ~/.config/adbgo/scrcpy.log (Terminal stays clean)"))
+	fmt.Println(ui.WarningStyle.Render("Close the scrcpy window to return to adbgo."))
+	fmt.Println()
+
+	recFile, err := adb.LaunchScrcpyClean(serial, profile)
+	if err != nil {
+		ui.PrintError(err.Error())
+		ui.PrintWarning("Is scrcpy installed? (pacman -S scrcpy / apt install scrcpy)")
+	} else {
+		ui.PrintSuccess("scrcpy session finished cleanly.")
+		if recFile != "" {
+			ui.PrintSuccess("Recording saved: " + recFile)
+		}
+	}
+	ui.Pause()
+}
+
+func buildCustomScrcpyProfile() adb.ScrcpyProfile {
+	var turnScreenOff bool
+	var stayAwake bool
+	var alwaysOnTop bool
+	var borderless bool
+	var audioMode string
+	var resolution int
+	var fps int
+
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title("Turn device screen off while mirroring?").
+				Value(&turnScreenOff),
+			huh.NewConfirm().
+				Title("Keep device awake while plugged in?").
+				Value(&stayAwake),
+			huh.NewConfirm().
+				Title("Keep window always on top?").
+				Value(&alwaysOnTop),
+			huh.NewConfirm().
+				Title("Borderless window?").
+				Value(&borderless),
+			huh.NewSelect[int]().
+				Title("Max resolution limit").
+				Options(
+					huh.NewOption("Native (Unlimited)", 0),
+					huh.NewOption("1080p (1920x1080)", 1920),
+					huh.NewOption("720p (1280x720) — Recommended for Wi-Fi", 1280),
+					huh.NewOption("480p (854x480) — Ultra fast", 854),
+				).
+				Value(&resolution),
+			huh.NewSelect[int]().
+				Title("Max Framerate").
+				Options(
+					huh.NewOption("Default", 0),
+					huh.NewOption("60 FPS", 60),
+					huh.NewOption("90 FPS", 90),
+					huh.NewOption("120 FPS", 120),
+				).
+				Value(&fps),
+			huh.NewSelect[string]().
+				Title("Audio Routing").
+				Options(
+					huh.NewOption("PC only (Default)", "pc"),
+					huh.NewOption("Both PC and Phone (Duplicate)", "dup"),
+					huh.NewOption("Disabled (No audio)", "none"),
+				).
+				Value(&audioMode),
+		),
+	)
+
+	if err := form.Run(); err != nil {
+		return adb.ScrcpyProfile{}
+	}
+
+	return adb.ScrcpyProfile{
+		Name:          "Custom Config",
+		TurnScreenOff: turnScreenOff,
+		StayAwake:     stayAwake,
+		AlwaysOnTop:   alwaysOnTop,
+		Borderless:    borderless,
+		MaxSize:       resolution,
+		MaxFPS:        fps,
+		NoAudio:       audioMode == "none",
+		AudioDup:      audioMode == "dup",
+	}
+}
+
 func checkForUpdates() {
 	fmt.Println()
 	ui.PrintInfo("Current version: " + version)
@@ -380,8 +635,6 @@ func checkForUpdates() {
 	ui.Pause()
 }
 
-// enableGodMode requires the account password — "YES" alone is not enough
-// to unlock nuclear options.
 func enableGodMode(session *auth.Session) {
 	ui.PrintWarning("You are about to enable GOD MODE.")
 	ui.PrintWarning("This unlocks factory reset, bootloader unlock, FRP tools, etc.")
@@ -405,21 +658,49 @@ func enableGodMode(session *auth.Session) {
 	time.Sleep(1 * time.Second)
 }
 
-func showDeviceControl(session *auth.Session) {
+func unlockDeviceFlow(cfg *config.Config, session *auth.Session) {
+	serial := session.Device.Serial
+	pw := session.Device.UnlockPassword
+
+	if pw == "" {
+		ui.PrintWarning("No lockscreen PIN/password stored for " + session.Device.Name)
+		fmt.Print("Enter your phone's lockscreen password or PIN: ")
+		pw = ui.ReadLine()
+		if pw == "" {
+			return
+		}
+		session.Device.UnlockPassword = pw
+		cfg.Save()
+		ui.PrintSuccess("Saved unlock PIN for future 1-click unlocks!")
+	}
+
+	ui.PrintInfo("Unlocking phone (waking screen, swiping up, typing PIN)...")
+	if err := adb.UnlockWithPassword(serial, pw); err != nil {
+		ui.PrintError("Unlock failed: " + err.Error())
+	} else {
+		ui.PrintSuccess("Phone unlocked!")
+	}
+	time.Sleep(800 * time.Millisecond)
+}
+
+func showDeviceControl(cfg *config.Config, session *auth.Session) {
 	var choice string
 	form := huh.NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("Device Control").
 				Options(
+					huh.NewOption("Unlock with PIN/Password (wake, swipe & enter PIN)", "unlock_pw"),
+					huh.NewOption("Lock Screen (turn screen off)", "lock"),
+					huh.NewOption("Take Screenshot", "screenshot"),
+					huh.NewOption("Record Screen (Ctrl+C to stop & auto-pull)", "record"),
+					huh.NewOption("Wake Screen", "wake"),
+					huh.NewOption("Send Text Input (type onto phone)", "type"),
+					huh.NewOption("Toggle Clean Demo Mode (100% battery, no icons)", "demo"),
 					huh.NewOption("Reboot", "reboot"),
 					huh.NewOption("Reboot to Recovery", "recovery"),
 					huh.NewOption("Reboot to Bootloader", "bootloader"),
 					huh.NewOption("Power Off", "poweroff"),
-					huh.NewOption("Take Screenshot", "screenshot"),
-					huh.NewOption("Record Screen", "record"),
-					huh.NewOption("Wake Screen", "wake"),
-					huh.NewOption("Lock Screen", "lock"),
 					huh.NewOption("Back", "back"),
 				).
 				Value(&choice),
@@ -429,30 +710,8 @@ func showDeviceControl(session *auth.Session) {
 
 	serial := session.Device.Serial
 	switch choice {
-	case "reboot":
-		if err := adb.Reboot(serial, ""); err != nil {
-			ui.PrintError(err.Error())
-		} else {
-			ui.PrintSuccess("Reboot command sent")
-		}
-	case "recovery":
-		if err := adb.Reboot(serial, "recovery"); err != nil {
-			ui.PrintError(err.Error())
-		} else {
-			ui.PrintSuccess("Rebooting to recovery")
-		}
-	case "bootloader":
-		if err := adb.Reboot(serial, "bootloader"); err != nil {
-			ui.PrintError(err.Error())
-		} else {
-			ui.PrintSuccess("Rebooting to bootloader")
-		}
-	case "poweroff":
-		if _, err := adb.Run(serial, "shell", "reboot", "-p"); err != nil {
-			ui.PrintError(err.Error())
-		} else {
-			ui.PrintSuccess("Power off command sent")
-		}
+	case "unlock_pw":
+		unlockDeviceFlow(cfg, session)
 	case "screenshot":
 		filename, err := adb.Screenshot(serial)
 		if err != nil {
@@ -479,6 +738,64 @@ func showDeviceControl(session *auth.Session) {
 		} else {
 			ui.PrintSuccess("Screen locked")
 		}
+	case "type":
+		fmt.Print("Enter text to type into active field: ")
+		text := ui.ReadLine()
+		if text != "" {
+			if err := adb.SendInputText(serial, text); err != nil {
+				ui.PrintError(err.Error())
+			} else {
+				ui.PrintSuccess("Text sent to device!")
+			}
+		}
+	case "demo":
+		var demoAction string
+		dForm := huh.NewForm(huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("System UI Demo Mode").
+				Options(
+					huh.NewOption("Enable (Clean status bar: 12:00, 100% battery)", "on"),
+					huh.NewOption("Disable (Restore normal status bar)", "off"),
+				).Value(&demoAction),
+		))
+		dForm.Run()
+		if demoAction == "on" {
+			if err := adb.EnableDemoMode(serial); err != nil {
+				ui.PrintError(err.Error())
+			} else {
+				ui.PrintSuccess("Demo mode enabled!")
+			}
+		} else if demoAction == "off" {
+			if err := adb.DisableDemoMode(serial); err != nil {
+				ui.PrintError(err.Error())
+			} else {
+				ui.PrintSuccess("Demo mode disabled!")
+			}
+		}
+	case "reboot":
+		if err := adb.Reboot(serial, ""); err != nil {
+			ui.PrintError(err.Error())
+		} else {
+			ui.PrintSuccess("Reboot command sent")
+		}
+	case "recovery":
+		if err := adb.Reboot(serial, "recovery"); err != nil {
+			ui.PrintError(err.Error())
+		} else {
+			ui.PrintSuccess("Rebooting to recovery")
+		}
+	case "bootloader":
+		if err := adb.Reboot(serial, "bootloader"); err != nil {
+			ui.PrintError(err.Error())
+		} else {
+			ui.PrintSuccess("Rebooting to bootloader")
+		}
+	case "poweroff":
+		if _, err := adb.Run(serial, "shell", "reboot", "-p"); err != nil {
+			ui.PrintError(err.Error())
+		} else {
+			ui.PrintSuccess("Power off command sent")
+		}
 	}
 	if choice != "back" && choice != "" {
 		ui.Pause()
@@ -492,12 +809,14 @@ func showAppManagement(session *auth.Session) {
 			huh.NewSelect[string]().
 				Title("App Management").
 				Options(
-					huh.NewOption("List user packages", "list_user"),
-					huh.NewOption("List all packages", "list_all"),
-					huh.NewOption("Install APK (sideload)", "install"),
-					huh.NewOption("Force-stop app", "force_stop"),
-					huh.NewOption("Clear app data", "clear"),
-					huh.NewOption("Uninstall app", "uninstall"),
+					huh.NewOption("Install APK or Split Bundle (.apk, .xapk, .apks)", "install"),
+					huh.NewOption("Extract / Backup APK to PC", "extract"),
+					huh.NewOption("Launch App", "launch"),
+					huh.NewOption("Force-Stop App", "force_stop"),
+					huh.NewOption("Clear App Data", "clear"),
+					huh.NewOption("Uninstall App", "uninstall"),
+					huh.NewOption("List 3rd-Party User Packages", "list_user"),
+					huh.NewOption("List All Packages", "list_all"),
 					huh.NewOption("Back", "back"),
 				).
 				Value(&choice),
@@ -507,22 +826,55 @@ func showAppManagement(session *auth.Session) {
 
 	serial := session.Device.Serial
 	switch choice {
-	case "list_user":
-		out, err := adb.Run(serial, "shell", "pm", "list", "packages", "-3")
-		if err != nil {
-			ui.PrintError(err.Error())
-		} else {
-			fmt.Println(out)
-		}
-	case "list_all":
-		out, err := adb.Run(serial, "shell", "pm", "list", "packages")
-		if err != nil {
-			ui.PrintError(err.Error())
-		} else {
-			fmt.Println(out)
-		}
 	case "install":
-		installAPKFlow(serial)
+		installPackageFlow(serial)
+
+	case "extract":
+		fmt.Print("Enter package name to extract: ")
+		pkg := ui.ReadLine()
+		if pkg != "" {
+			ui.PrintInfo("Extracting APK(s) for " + pkg + "...")
+			files, err := adb.ExtractAPK(serial, pkg, ".")
+			if err != nil {
+				ui.PrintError(err.Error())
+			} else {
+				ui.PrintSuccess(fmt.Sprintf("Extracted %d file(s): %s", len(files), strings.Join(files, ", ")))
+			}
+		}
+
+	case "launch":
+		fmt.Print("Enter package name to launch: ")
+		pkg := ui.ReadLine()
+		if pkg != "" {
+			if err := adb.LaunchApp(serial, pkg); err != nil {
+				ui.PrintError(err.Error())
+			} else {
+				ui.PrintSuccess("Launched " + pkg)
+			}
+		}
+
+	case "list_user":
+		pkgs, err := adb.UserPackages(serial)
+		if err != nil {
+			ui.PrintError(err.Error())
+		} else {
+			fmt.Printf("Total %d user packages:\n", len(pkgs))
+			for _, p := range pkgs {
+				fmt.Println("  • " + p)
+			}
+		}
+
+	case "list_all":
+		pkgs, err := adb.AllPackages(serial)
+		if err != nil {
+			ui.PrintError(err.Error())
+		} else {
+			fmt.Printf("Total %d packages:\n", len(pkgs))
+			for _, p := range pkgs {
+				fmt.Println("  • " + p)
+			}
+		}
+
 	case "force_stop", "clear", "uninstall":
 		fmt.Print("Enter package name: ")
 		pkg := ui.ReadLine()
@@ -532,17 +884,17 @@ func showAppManagement(session *auth.Session) {
 		var err error
 		switch choice {
 		case "force_stop":
-			_, err = adb.Run(serial, "shell", "am", "force-stop", pkg)
+			err = adb.ForceStopApp(serial, pkg)
 			if err == nil {
 				ui.PrintSuccess("Force-stopped " + pkg)
 			}
 		case "clear":
-			_, err = adb.Run(serial, "shell", "pm", "clear", pkg)
+			err = adb.ClearAppData(serial, pkg)
 			if err == nil {
 				ui.PrintSuccess("Cleared data for " + pkg)
 			}
 		case "uninstall":
-			_, err = adb.Run(serial, "uninstall", pkg)
+			err = adb.UninstallApp(serial, pkg)
 			if err == nil {
 				ui.PrintSuccess("Uninstalled " + pkg)
 			}
@@ -556,16 +908,14 @@ func showAppManagement(session *auth.Session) {
 	}
 }
 
-// installAPKFlow sideloads an APK picked from the local filesystem with
-// streamed install output.
-func installAPKFlow(serial string) {
-	var apkPath string
+func installPackageFlow(serial string) {
+	var pkgPath string
 	var downgrade bool
 
 	picker := huh.NewFilePicker().
-		Title("Choose an APK to install").
-		AllowedTypes([]string{".apk", ".apkm", ".apks"}).
-		Value(&apkPath)
+		Title("Choose APK or Bundle (.apk, .xapk, .apks, .zip)").
+		AllowedTypes([]string{".apk", ".apkm", ".apks", ".xapk", ".zip"}).
+		Value(&pkgPath)
 
 	form := huh.NewForm(
 		huh.NewGroup(picker),
@@ -580,20 +930,19 @@ func installAPKFlow(serial string) {
 		return
 	}
 
-	if strings.TrimSpace(apkPath) == "" {
-		// Picker unavailable/cancelled — fall back to typing the path
-		fmt.Print("Enter path to APK file: ")
-		apkPath = ui.ReadLine()
-		if apkPath == "" {
+	if strings.TrimSpace(pkgPath) == "" {
+		fmt.Print("Enter path to file: ")
+		pkgPath = ui.ReadLine()
+		if pkgPath == "" {
 			return
 		}
 	}
 
-	ui.PrintInfo("Installing " + apkPath + " (streamed output):")
-	if err := adb.InstallAPK(serial, apkPath, downgrade); err != nil {
+	ui.PrintInfo("Installing " + pkgPath + "...")
+	if err := adb.InstallPackage(serial, pkgPath, downgrade); err != nil {
 		ui.PrintError("Install failed: " + err.Error())
 	} else {
-		ui.PrintSuccess("Installed " + apkPath)
+		ui.PrintSuccess("Installed successfully: " + pkgPath)
 	}
 }
 
@@ -604,11 +953,13 @@ func showFileSystem(session *auth.Session) {
 			huh.NewSelect[string]().
 				Title("File & System").
 				Options(
+					huh.NewOption("Browse device files (push / pull / preview)", "browse"),
+					huh.NewOption("Sync Camera Photos to PC", "sync_photos"),
+					huh.NewOption("Live Logcat (package/priority/crash buffer)", "logcat"),
+					huh.NewOption("Wireless ADB (tcpip, pairing, mDNS)", "wireless"),
 					huh.NewOption("Open interactive shell", "shell"),
-					huh.NewOption("Live Logcat (filter by package / priority)", "logcat"),
-					huh.NewOption("Browse device files (push / pull)", "browse"),
-					huh.NewOption("Wireless ADB (connect over Wi-Fi)", "wireless"),
-					huh.NewOption("Device info", "info"),
+					huh.NewOption("Open Deep Link / URL intent", "deeplink"),
+					huh.NewOption("Device Info (hardware & props)", "info"),
 					huh.NewOption("Back", "back"),
 				).
 				Value(&choice),
@@ -618,15 +969,33 @@ func showFileSystem(session *auth.Session) {
 
 	serial := session.Device.Serial
 	switch choice {
+	case "browse":
+		browseFlow(serial)
+	case "sync_photos":
+		ui.PrintInfo("Pulling /sdcard/DCIM/Camera to local folder...")
+		dest, err := adb.SyncPhotos(serial, "")
+		if err != nil {
+			ui.PrintError(err.Error())
+		} else {
+			ui.PrintSuccess("Synced photos to " + dest)
+		}
 	case "shell":
 		ui.PrintWarning("Starting adb shell. Type 'exit' to return.")
 		if err := adb.RunStreaming(serial, "shell"); err != nil {
 			ui.PrintError("Shell ended with error: " + err.Error())
 		}
+	case "deeplink":
+		fmt.Print("Enter URL or URI scheme (e.g. https://example.com or myapp://open): ")
+		url := ui.ReadLine()
+		if url != "" {
+			if err := adb.OpenDeepLink(serial, url); err != nil {
+				ui.PrintError(err.Error())
+			} else {
+				ui.PrintSuccess("Deep link opened on device!")
+			}
+		}
 	case "logcat":
 		logcatFlow(serial)
-	case "browse":
-		browseFlow(serial)
 	case "wireless":
 		wirelessFlow(serial)
 	case "info":
@@ -638,8 +1007,26 @@ func showFileSystem(session *auth.Session) {
 }
 
 func logcatFlow(serial string) {
+	var mode string
+	mForm := huh.NewForm(huh.NewGroup(
+		huh.NewSelect[string]().
+			Title("Logcat View Mode").
+			Options(
+				huh.NewOption("Live Streaming", "stream"),
+				huh.NewOption("View Recent Crash Buffer", "crash"),
+			).Value(&mode),
+	))
+	mForm.Run()
+
+	if mode == "crash" {
+		ui.PrintInfo("Querying crash buffer...")
+		_ = adb.RunLogcat(serial, adb.LogcatFilter{DumpCrash: true})
+		return
+	}
+
 	var pkg string
 	var priority string
+	var tag string
 	var clearFirst bool
 
 	form := huh.NewForm(
@@ -648,6 +1035,10 @@ func logcatFlow(serial string) {
 				Title("Filter by package (blank = all logs)").
 				Placeholder("com.example.app").
 				Value(&pkg),
+			huh.NewInput().
+				Title("Filter by tag (blank = all tags)").
+				Placeholder("ActivityManager").
+				Value(&tag),
 			huh.NewSelect[string]().
 				Title("Minimum priority").
 				Options(
@@ -672,6 +1063,7 @@ func logcatFlow(serial string) {
 
 	if err := adb.RunLogcat(serial, adb.LogcatFilter{
 		Package:    strings.TrimSpace(pkg),
+		Tag:        strings.TrimSpace(tag),
 		Priority:   priority,
 		ClearFirst: clearFirst,
 	}); err != nil {
@@ -680,7 +1072,6 @@ func logcatFlow(serial string) {
 	fmt.Println()
 }
 
-// browseFlow is an interactive remote file manager rooted at /sdcard.
 func browseFlow(serial string) {
 	path := "/sdcard"
 
@@ -728,10 +1119,14 @@ func browseFlow(serial string) {
 			}
 			continue
 		case "push":
-			fmt.Print("Local path to push: ")
-			local := ui.ReadLine()
-			if local == "" {
-				continue
+			var local string
+			picker := huh.NewFilePicker().Title("Select local file to push").Value(&local)
+			if err := huh.NewForm(huh.NewGroup(picker)).Run(); err != nil || local == "" {
+				fmt.Print("Or type local path manually: ")
+				local = ui.ReadLine()
+				if local == "" {
+					continue
+				}
 			}
 			ui.PrintInfo("Pushing " + local + " → " + path)
 			if err := adb.Push(serial, local, path); err != nil {
@@ -739,6 +1134,8 @@ func browseFlow(serial string) {
 			} else {
 				ui.PrintSuccess("Pushed " + local)
 			}
+			ui.Pause()
+
 		case "mkdir":
 			fmt.Print("Folder name: ")
 			name := ui.ReadLine()
@@ -750,8 +1147,9 @@ func browseFlow(serial string) {
 			} else {
 				ui.PrintSuccess("Created " + name)
 			}
+			ui.Pause()
+
 		default:
-			// An entry was selected
 			entryPath := path + "/" + action
 			entry := findEntry(entries, action)
 			if entry == nil {
@@ -762,14 +1160,14 @@ func browseFlow(serial string) {
 				continue
 			}
 
-			// File selected: what to do with it?
 			var fileAction string
 			fileForm := huh.NewForm(
 				huh.NewGroup(
 					huh.NewSelect[string]().
 						Title(entryPath).
 						Options(
-							huh.NewOption("⬇ Pull (download)", "pull"),
+							huh.NewOption("⬇ Pull (download to PC)", "pull"),
+							huh.NewOption("👁 Preview (view text in terminal)", "preview"),
 							huh.NewOption("🗑 Delete (rm -rf)", "delete"),
 							huh.NewOption("Cancel", "cancel"),
 						).
@@ -785,6 +1183,14 @@ func browseFlow(serial string) {
 					ui.PrintError(err.Error())
 				} else {
 					ui.PrintSuccess("Pulled to " + local)
+				}
+			case "preview":
+				content, err := adb.ReadRemoteFile(serial, entryPath, 40)
+				if err != nil {
+					ui.PrintError(err.Error())
+				} else {
+					fmt.Println("\n" + ui.TitleStyle.Render("Preview: "+entryPath))
+					fmt.Println(content)
 				}
 			case "delete":
 				if danger.ConfirmYES("DELETE " + entryPath) {
@@ -820,15 +1226,17 @@ func parentDir(path string) string {
 	return path[:idx]
 }
 
-// wirelessFlow connects the device over Wi-Fi (adb tcpip 5555 → adb connect).
 func wirelessFlow(serial string) {
 	var choice string
 	form := huh.NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
-				Title("Wireless ADB — " + serial).
+				Title("Wireless ADB").
 				Options(
-					huh.NewOption("Connect this device over Wi-Fi", "connect"),
+					huh.NewOption("Enable tcpip 5555 and connect USB device", "connect_tcpip"),
+					huh.NewOption("Pair with Android 11+ pairing code", "pair"),
+					huh.NewOption("Connect directly to IP:Port", "direct"),
+					huh.NewOption("Scan local network for mDNS wireless devices", "scan"),
 					huh.NewOption("Disconnect a wireless device", "disconnect"),
 					huh.NewOption("Back", "back"),
 				).
@@ -838,17 +1246,88 @@ func wirelessFlow(serial string) {
 	form.Run()
 
 	switch choice {
-	case "connect":
-		ui.PrintInfo("Reading device Wi-Fi IP...")
-		wirelessSerial, err := adb.ConnectWireless(serial)
+	case "connect_tcpip":
+		target := serial
+		if target == "" {
+			devices, _ := adb.ListDevices()
+			var usbDevices []adb.DeviceInfo
+			for _, d := range devices {
+				if !strings.Contains(d.Serial, ":") && d.Status == "device" {
+					usbDevices = append(usbDevices, d)
+				}
+			}
+			if len(usbDevices) == 0 {
+				ui.PrintError("No online USB devices found. Connect via USB cable first.")
+				break
+			}
+			opts := make([]huh.Option[string], len(usbDevices))
+			for i, d := range usbDevices {
+				label := d.Serial
+				if d.Model != "" {
+					label = fmt.Sprintf("%s (%s)", d.Serial, d.Model)
+				}
+				opts[i] = huh.NewOption(label, d.Serial)
+			}
+			selForm := huh.NewForm(huh.NewGroup(
+				huh.NewSelect[string]().Title("Select USB device to switch to Wi-Fi").Options(opts...).Value(&target),
+			))
+			if err := selForm.Run(); err != nil || target == "" {
+				break
+			}
+		}
+		ui.PrintInfo("Enabling TCP/IP mode on " + target + "...")
+		wirelessSerial, err := adb.ConnectWireless(target)
 		if err != nil {
 			ui.PrintError(err.Error())
-			ui.PrintWarning("Make sure the phone is on the same Wi-Fi network and USB debugging is on.")
+			ui.PrintWarning("Make sure the phone is on the same Wi-Fi network and USB debugging is enabled.")
 			break
 		}
 		ui.PrintSuccess("Connected! Wireless serial: " + wirelessSerial)
 		ui.PrintInfo("You can now unplug the USB cable.")
-		ui.PrintInfo("Tip: register '" + wirelessSerial + "' via Signup to login over Wi-Fi next time.")
+		ui.PrintInfo("Tip: register '" + wirelessSerial + "' via Signup to login over Wi-Fi without a cable.")
+
+	case "pair":
+		var ipPort, code string
+		pForm := huh.NewForm(huh.NewGroup(
+			huh.NewInput().Title("Pairing IP:Port (shown on phone under Wireless debugging)").Placeholder("192.168.1.10:37281").Value(&ipPort),
+			huh.NewInput().Title("6-digit Pairing Code").Placeholder("123456").Value(&code),
+		))
+		if err := pForm.Run(); err != nil || ipPort == "" || code == "" {
+			break
+		}
+		ui.PrintInfo("Pairing with " + ipPort + "...")
+		if err := adb.PairWireless(ipPort, code); err != nil {
+			ui.PrintError(err.Error())
+		} else {
+			ui.PrintSuccess("Paired! Now use 'Connect directly to IP:Port' with the main port shown on your phone.")
+		}
+
+	case "direct":
+		fmt.Print("Enter IP:Port to connect (e.g. 192.168.1.50:5555): ")
+		target := ui.ReadLine()
+		if target != "" {
+			ui.PrintInfo("Connecting to " + target + "...")
+			if err := adb.ConnectDirect(target); err != nil {
+				ui.PrintError(err.Error())
+			} else {
+				ui.PrintSuccess("Connected to " + target + "! You can now select it in adbgo.")
+			}
+		}
+
+	case "scan":
+		ui.PrintInfo("Scanning mDNS for wireless devices...")
+		targets, err := adb.DiscoverMDNS()
+		if err != nil {
+			ui.PrintError(err.Error())
+		} else if len(targets) == 0 {
+			ui.PrintWarning("No mDNS wireless devices found. Check if Wireless Debugging is enabled on phone.")
+		} else {
+			ui.PrintSuccess(fmt.Sprintf("Found %d wireless target(s):", len(targets)))
+			for _, t := range targets {
+				fmt.Println("  • " + t)
+			}
+		}
+
 	case "disconnect":
 		devices, err := adb.ListDevices()
 		if err != nil {
@@ -857,12 +1336,12 @@ func wirelessFlow(serial string) {
 		}
 		var wireless []adb.DeviceInfo
 		for _, d := range devices {
-			if strings.Contains(d.Serial, ":5555") {
+			if strings.Contains(d.Serial, ":") {
 				wireless = append(wireless, d)
 			}
 		}
 		if len(wireless) == 0 {
-			ui.PrintError("No wireless (tcpip) devices connected.")
+			ui.PrintError("No wireless devices connected.")
 			break
 		}
 		opts := make([]huh.Option[string], len(wireless))
@@ -879,6 +1358,9 @@ func wirelessFlow(serial string) {
 		} else {
 			ui.PrintSuccess("Disconnected " + sel)
 		}
+	}
+	if choice != "back" && choice != "" {
+		ui.Pause()
 	}
 }
 
@@ -901,7 +1383,6 @@ func showDeviceInfo(serial string) {
 	}
 }
 
-// showMultiDevice runs an action against several connected devices at once.
 func showMultiDevice(session *auth.Session) {
 	devices, err := adb.ListDevices()
 	if err != nil {
@@ -921,7 +1402,6 @@ func showMultiDevice(session *auth.Session) {
 		return
 	}
 
-	// Device multi-select
 	opts := make([]huh.Option[string], len(online))
 	for i, d := range online {
 		label := d.Serial
@@ -953,9 +1433,8 @@ func showMultiDevice(session *auth.Session) {
 					huh.NewOption("Wake screens", "wake"),
 					huh.NewOption("Lock screens", "lock"),
 					huh.NewOption("Reboot all", "reboot"),
-					huh.NewOption("Reboot to Recovery", "recovery"),
-					huh.NewOption("Reboot to Bootloader", "bootloader"),
-					huh.NewOption("Screenshots", "screenshot"),
+					huh.NewOption("Install APK on all devices", "install_all"),
+					huh.NewOption("Screenshots from all", "screenshot"),
 					huh.NewOption("List user packages", "apps"),
 					huh.NewOption("Cancel", "cancel"),
 				).
@@ -964,6 +1443,15 @@ func showMultiDevice(session *auth.Session) {
 	)
 	if err := actForm.Run(); err != nil || action == "cancel" {
 		return
+	}
+
+	var sharedAPK string
+	if action == "install_all" {
+		fmt.Print("Path to APK to install on all devices: ")
+		sharedAPK = ui.ReadLine()
+		if sharedAPK == "" {
+			return
+		}
 	}
 
 	okCount := 0
@@ -976,35 +1464,26 @@ func showMultiDevice(session *auth.Session) {
 			err = adb.LockScreen(serial)
 		case "reboot":
 			err = adb.Reboot(serial, "")
-		case "recovery":
-			err = adb.Reboot(serial, "recovery")
-		case "bootloader":
-			err = adb.Reboot(serial, "bootloader")
 		case "screenshot":
 			var file string
 			file, err = adb.Screenshot(serial)
 			if err == nil {
 				ui.PrintSuccess(serial + " → " + file)
 			}
+		case "install_all":
+			ui.PrintInfo("Installing to " + serial + "...")
+			err = adb.InstallPackage(serial, sharedAPK, false)
 		case "apps":
 			var pkgs []string
 			pkgs, err = adb.UserPackages(serial)
 			if err == nil {
 				ui.PrintInfo(serial + ": " + fmt.Sprint(len(pkgs)) + " user packages")
-				for i, p := range pkgs {
-					if i >= 15 {
-						ui.PrintInfo("... and " + fmt.Sprint(len(pkgs)-15) + " more")
-						break
-					}
-					fmt.Println("  " + p)
-				}
 			}
 		}
 		if err != nil {
 			ui.PrintError(serial + " failed: " + err.Error())
 		} else {
-			switch action {
-			case "wake", "lock", "reboot", "recovery", "bootloader":
+			if action != "screenshot" && action != "apps" {
 				ui.PrintSuccess(serial + " → done")
 			}
 			okCount++
@@ -1014,7 +1493,6 @@ func showMultiDevice(session *auth.Session) {
 	ui.Pause()
 }
 
-// showDeviceManagement renames or removes registered devices.
 func showDeviceManagement(cfg *config.Config) {
 	ui.ClearScreen()
 	fmt.Println(ui.TitleStyle.Render("adbgo — Device Management"))
@@ -1089,8 +1567,6 @@ func showDeviceManagement(cfg *config.Config) {
 			} else {
 				ui.PrintError("Cancelled")
 			}
-		case "back":
-			// loop back to device list
 		}
 	}
 }
@@ -1168,14 +1644,14 @@ func showDangerZone(session *auth.Session) {
 			huh.NewSelect[string]().
 				Title(ui.WarningStyle.Render("DANGER ZONE — NUCLEAR OPTIONS")).
 				Options(
+					huh.NewOption("Interactive Root Shell (su with PTY)", "root"),
 					huh.NewOption("Factory Reset / Wipe Data", "factory"),
 					huh.NewOption("Wipe Cache", "cache"),
-					huh.NewOption("Unlock Bootloader", "unlock"),
-					huh.NewOption("Lock Bootloader", "lock"),
+					huh.NewOption("Unlock Bootloader (fastboot)", "unlock"),
+					huh.NewOption("Lock Bootloader (fastboot)", "lock"),
 					huh.NewOption("Remove Screen Lock", "lockscreen"),
 					huh.NewOption("Attempt Disable FRP", "frp"),
 					huh.NewOption("Format /data", "format_data"),
-					huh.NewOption("Interactive Root Shell", "root"),
 					huh.NewOption("Raw adb command", "raw_adb"),
 					huh.NewOption("Raw fastboot command", "raw_fastboot"),
 					huh.NewOption("Back", "back"),
@@ -1189,6 +1665,8 @@ func showDangerZone(session *auth.Session) {
 	var err error
 
 	switch choice {
+	case "root":
+		err = danger.FullRootShell(serial)
 	case "factory":
 		err = danger.FactoryReset(serial)
 	case "cache":
@@ -1203,8 +1681,6 @@ func showDangerZone(session *auth.Session) {
 		err = danger.DisableFRP(serial)
 	case "format_data":
 		err = danger.FormatData(serial)
-	case "root":
-		err = danger.FullRootShell(serial)
 	case "raw_adb":
 		err = danger.RawADB(serial)
 	case "raw_fastboot":

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -127,15 +128,12 @@ func RunStreaming(serial string, args ...string) error {
 	return cmd.Run()
 }
 
-// StartScrcpy launches scrcpy for the device (blocking until scrcpy exits)
+// StartScrcpy launches scrcpy cleanly with logs captured to the background log file.
 func StartScrcpy(serial string, extraArgs ...string) error {
-	args := []string{"--serial", serial}
-	args = append(args, extraArgs...)
-	cmd := exec.Command("scrcpy", args...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	_, err := LaunchScrcpyClean(serial, ScrcpyProfile{
+		ExtraArgs: extraArgs,
+	})
+	return err
 }
 
 // Reboot reboots the device into normal / recovery / bootloader
@@ -178,6 +176,55 @@ func WaitForFastboot(serial string, timeout time.Duration) bool {
 // WakeScreen wakes the device screen
 func WakeScreen(serial string) error {
 	_, err := Run(serial, "shell", "input", "keyevent", "KEYCODE_WAKEUP")
+	return err
+}
+
+// SwipeUp performs a swipe up gesture to reveal lock screen / PIN pad
+func SwipeUp(serial string) error {
+	sizeOut, err := Run(serial, "shell", "wm", "size")
+	if err == nil {
+		sizeStr := strings.TrimSpace(strings.ReplaceAll(sizeOut, "Physical size:", ""))
+		parts := strings.Split(sizeStr, "x")
+		if len(parts) == 2 {
+			w, errW := strconv.Atoi(strings.TrimSpace(parts[0]))
+			h, errH := strconv.Atoi(strings.TrimSpace(parts[1]))
+			if errW == nil && errH == nil && w > 0 && h > 0 {
+				midX := w / 2
+				startY := h * 4 / 5
+				endY := h / 5
+				_, err = Run(serial, "shell", "input", "swipe",
+					strconv.Itoa(midX), strconv.Itoa(startY),
+					strconv.Itoa(midX), strconv.Itoa(endY), "250")
+				return err
+			}
+		}
+	}
+	_, err = Run(serial, "shell", "input", "swipe", "500", "1600", "500", "400", "250")
+	return err
+}
+
+// UnlockWithPassword powers on the screen, swipes up, types the password, and presses Enter.
+func UnlockWithPassword(serial, password string) error {
+	if err := WakeScreen(serial); err != nil {
+		return fmt.Errorf("wake failed: %w", err)
+	}
+	time.Sleep(350 * time.Millisecond)
+
+	if err := SwipeUp(serial); err != nil {
+		return fmt.Errorf("swipe failed: %w", err)
+	}
+	time.Sleep(450 * time.Millisecond)
+
+	// Trigger KEYCODE_MENU to ensure PIN keypad is active/focused
+	Run(serial, "shell", "input", "keyevent", "82")
+	time.Sleep(200 * time.Millisecond)
+
+	if err := SendInputText(serial, password); err != nil {
+		return fmt.Errorf("typing password failed: %w", err)
+	}
+	time.Sleep(250 * time.Millisecond)
+
+	_, err := Run(serial, "shell", "input", "keyevent", "66")
 	return err
 }
 

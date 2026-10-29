@@ -4,11 +4,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
-	"adbgo/internal/adb"
-	"adbgo/internal/ui"
+	"github.com/dev-roba/adbgo/internal/adb"
+	"github.com/dev-roba/adbgo/internal/ui"
 )
 
 // ConfirmYES forces the user to type exactly "YES"
@@ -100,11 +101,25 @@ func RemoveScreenLock(serial string) error {
 		ui.PrintError("Cancelled")
 		return nil
 	}
-	ui.PrintWarning("Note: this only works on rooted devices (or very old Android versions).")
+	versionStr, _ := adb.Run(serial, "shell", "getprop", "ro.build.version.release")
+	versionStr = strings.TrimSpace(versionStr)
+	ver, _ := strconv.Atoi(strings.Split(versionStr, ".")[0])
+	if ver >= 9 {
+		ui.PrintWarning(fmt.Sprintf("Device is running Android %s. Modern Android uses File-Based Encryption (FBE).", versionStr))
+		ui.PrintWarning("Removing key files will NOT unlock the device and may brick the keystore.")
+		if !ConfirmYES("Proceed anyway despite risk of bricking keystore") {
+			ui.PrintError("Aborted for safety.")
+			return nil
+		}
+	} else {
+		ui.PrintWarning("Note: this only works on rooted devices or legacy Android versions.")
+	}
+
 	commands := [][]string{
 		{"shell", "locksettings", "clear", "--old", ""},
 		{"shell", "su", "-c", "rm", "-f", "/data/system/gesture.key"},
 		{"shell", "su", "-c", "rm", "-f", "/data/system/password.key"},
+		{"shell", "su", "-c", "rm", "-f", "/data/system/locksettings.db*"},
 	}
 	for _, args := range commands {
 		adb.Run(serial, args...)
@@ -118,10 +133,11 @@ func DisableFRP(serial string) error {
 		ui.PrintError("Cancelled")
 		return nil
 	}
+	ui.PrintWarning("Attempting standard provisioning flags. (Note: patched on Android 8+).")
 	adb.Run(serial, "shell", "content", "insert", "--uri", "content://settings/secure", "--bind", "name:s:user_setup_complete", "--bind", "value:s:1")
 	adb.Run(serial, "shell", "settings", "put", "global", "device_provisioned", "1")
 	adb.Run(serial, "shell", "settings", "put", "secure", "user_setup_complete", "1")
-	ui.PrintSuccess("FRP disable attempts sent.")
+	ui.PrintSuccess("FRP disable broadcast commands sent.")
 	return nil
 }
 
@@ -134,13 +150,30 @@ func FormatData(serial string) error {
 	return err
 }
 
+// FullRootShell fixes issue #2: it tests if adbd can restart as root; if not,
+// it launches an interactive root shell forcing PTY allocation (-t) with su
+// so stdin, arrows, and terminal control work properly.
 func FullRootShell(serial string) error {
-	if !ConfirmYES("Open interactive root shell (su)") {
+	if !ConfirmYES("Open interactive root shell") {
 		ui.PrintError("Cancelled")
 		return nil
 	}
-	ui.PrintWarning("Starting shell. Type 'su' for root if available. Type 'exit' to return.")
-	return adb.RunStreaming(serial, "shell")
+
+	ui.PrintInfo("Checking if adbd can run as root...")
+	out, _ := adb.Run(serial, "root")
+	if strings.Contains(out, "restarting adbd as root") {
+		ui.PrintSuccess("adbd restarted as root! Spawning root shell...")
+		time.Sleep(1 * time.Second)
+		return adb.RunStreaming(serial, "shell")
+	}
+	if strings.Contains(out, "already running as root") {
+		ui.PrintSuccess("adbd already running as root! Spawning root shell...")
+		return adb.RunStreaming(serial, "shell")
+	}
+
+	ui.PrintInfo("adbd cannot run as root directly. Allocating PTY for 'su'...")
+	// Force PTY (-t) so stdin and terminal interactive input work with su!
+	return adb.RunStreaming(serial, "shell", "-t", "su")
 }
 
 func RawADB(serial string) error {
