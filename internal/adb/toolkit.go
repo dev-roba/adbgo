@@ -146,7 +146,9 @@ func StreamLogcat(ctx context.Context, serial, priority, packageName string, dst
 func StartScreenRecording(ctx context.Context, serial, remotePath string, seconds int) (*exec.Cmd, error) {
 	if seconds < 1 || seconds > 180 { return nil, fmt.Errorf("recording duration must be between 1 and 180 seconds") }
 	if !strings.HasPrefix(remotePath, "/sdcard/") { return nil, fmt.Errorf("recording path must be under /sdcard") }
+	if strings.TrimSpace(serial) == "" { return nil, fmt.Errorf("device serial is required") }
 	cmd := exec.CommandContext(ctx, "adb", "-s", serial, "shell", "screenrecord", "--time-limit", fmt.Sprint(seconds), remotePath)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Start(); err != nil { return nil, err }
 	return cmd, nil
 }
