@@ -52,7 +52,7 @@ func TestFindBySerialReturnsMatchingDevice(t *testing.T) {
 	cfg := &Config{Devices: []Device{{Serial: "a", Name: "A"}, {Serial: "b", Name: "B"}}}
 	got := cfg.FindBySerial("b")
 	if got == nil || got.Name != "B" {
-		t.Fatalf("FindBySerial("b") = %#v, want device B", got)
+		t.Fatalf("FindBySerial(%q) = %#v, want device B", "b", got)
 	}
 	if cfg.FindBySerial("missing") != nil {
 		t.Fatal("FindBySerial for missing serial should return nil")
