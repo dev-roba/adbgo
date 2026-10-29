@@ -594,10 +594,42 @@ func pickLocalFile(title string) string {
 }
 
 func wirelessADB(session *auth.Session) {
+	var mode string
+	form := huh.NewForm(huh.NewGroup(huh.NewSelect[string]().Title("Wireless ADB setup").Options(
+		huh.NewOption("Legacy: USB connected, then adb tcpip 5555", "legacy"),
+		huh.NewOption("Modern Android: Wireless Debugging pairing code", "pair"),
+		huh.NewOption("Back", "back"),
+	).Value(&mode)))
+	if form.Run() != nil || mode == "back" { return }
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	if mode == "pair" {
+		ui.PrintWarning("On Android, open Developer options → Wireless debugging → Pair device with pairing code.")
+		var pairingEndpoint, code, connectEndpoint string
+		form = huh.NewForm(huh.NewGroup(
+			huh.NewInput().Title("Pairing IP:port shown in the pairing dialog").Placeholder("192.168.1.20:37123").Value(&pairingEndpoint),
+			huh.NewInput().Title("6-digit pairing code").Placeholder("123456").Value(&code),
+			huh.NewInput().Title("Connection IP:port shown on Wireless debugging screen").Placeholder("192.168.1.20:5555").Value(&connectEndpoint),
+		))
+		if form.Run() != nil { return }
+		if err := adb.PairWireless(ctx, pairingEndpoint, code, connectEndpoint); err != nil {
+			ui.PrintError(err.Error())
+		} else {
+			ui.PrintSuccess("Wireless debugging paired and connected: "+strings.TrimSpace(connectEndpoint))
+		}
+		ui.Pause()
+		return
+	}
+
 	devices, err := adb.ListDevices()
 	if err != nil { ui.PrintError(err.Error()); ui.Pause(); return }
 	var options []huh.Option[string]
-	for _, d := range devices { if d.Status == "device" && !strings.Contains(d.Serial, ":") { options = append(options, huh.NewOption(d.Serial+" ("+d.Model+")", d.Serial)) } }
+	for _, d := range devices {
+		if d.Status == "device" && !strings.Contains(d.Serial, ":") {
+			options = append(options, huh.NewOption(d.Serial+" ("+d.Model+")", d.Serial))
+		}
+	}
 	if len(options) == 0 { ui.PrintError("Connect and authorize the phone over USB first."); ui.Pause(); return }
 	serial := session.Device.Serial
 	if !adb.IsConnected(serial) || strings.Contains(serial, ":") {
@@ -605,10 +637,14 @@ func wirelessADB(session *auth.Session) {
 		if form.Run() != nil { return }
 	}
 	var hostPort string
-	form := huh.NewForm(huh.NewGroup(huh.NewInput().Title("Phone Wi-Fi IP:port").Placeholder("192.168.1.20:5555").Value(&hostPort)))
+	form = huh.NewForm(huh.NewGroup(huh.NewInput().Title("Phone Wi-Fi IP:port").Placeholder("192.168.1.20:5555").Value(&hostPort)))
 	if form.Run() != nil { return }
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second); defer cancel()
-	if err := adb.ConnectTCPIP(ctx, serial, hostPort); err != nil { ui.PrintError(err.Error()) } else { ui.PrintSuccess("Wireless ADB connected: "+hostPort); ui.PrintWarning("On modern Android, prefer Settings → Developer options → Wireless debugging → Pair device.") }
+	if err := adb.ConnectTCPIP(ctx, serial, hostPort); err != nil {
+		ui.PrintError(err.Error())
+	} else {
+		ui.PrintSuccess("Wireless ADB connected: "+strings.TrimSpace(hostPort))
+		ui.PrintWarning("Keep the phone and computer on the same trusted network. Disable wireless debugging when finished.")
+	}
 	ui.Pause()
 }
 
