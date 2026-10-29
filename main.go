@@ -775,13 +775,19 @@ func multiDeviceTools() {
 	devices, err := adb.ListDevices()
 	if err != nil { ui.PrintError(err.Error()); ui.Pause(); return }
 	var opts []huh.Option[string]
-	for _, d := range devices { if d.Status == "device" { opts = append(opts, huh.NewOption(d.Serial+" ("+d.Model+")", d.Serial)) } }
+	for _, d := range devices {
+		if d.Status == "device" { opts = append(opts, huh.NewOption(d.Serial+" ("+d.Model+")", d.Serial)) }
+	}
 	if len(opts) < 2 { ui.PrintWarning("Connect at least two authorized devices for multi-device mode."); ui.Pause(); return }
 	var selected []string
 	form := huh.NewForm(huh.NewGroup(huh.NewMultiSelect[string]().Title("Select devices").Options(opts...).Value(&selected)))
 	if form.Run() != nil || len(selected) == 0 { return }
 	var action string
-	form = huh.NewForm(huh.NewGroup(huh.NewSelect[string]().Title("Action for selected devices").Options(huh.NewOption("Read device model (safe)", "info"), huh.NewOption("Reboot selected devices", "reboot")).Value(&action)))
+	form = huh.NewForm(huh.NewGroup(huh.NewSelect[string]().Title("Action for selected devices").Options(
+		huh.NewOption("Read device model (safe)", "info"),
+		huh.NewOption("Capture screenshots from all selected devices", "screenshot"),
+		huh.NewOption("Reboot selected devices", "reboot"),
+	).Value(&action)))
 	if form.Run() != nil { return }
 	if action == "reboot" {
 		fmt.Printf("This will reboot %d selected device(s): %s\n", len(selected), strings.Join(selected, ", "))
@@ -789,13 +795,26 @@ func multiDeviceTools() {
 		fmt.Print("Type REBOOT to continue: ")
 		if _, err := fmt.Scanln(&confirm); err != nil || confirm != "REBOOT" { ui.PrintWarning("Cancelled."); return }
 	}
+	stamp := time.Now().Format("20060102-150405")
 	for _, serial := range selected {
-		if action == "reboot" {
+		switch action {
+		case "reboot":
 			if err := adb.Reboot(serial, ""); err != nil { fmt.Printf("[%s] ERROR: %v\n", serial, err) } else { fmt.Printf("[%s] reboot command sent\n", serial) }
-			continue
+		case "screenshot":
+			name := strings.NewReplacer(":", "-", "/", "-", "\\", "-").Replace(serial)
+			remote := "/sdcard/adbgo-"+stamp+".png"
+			local := fmt.Sprintf("screenshot-%s-%s.png", name, stamp)
+			if _, err := adb.RunContext(context.Background(), serial, "shell", "screencap", "-p", remote); err != nil {
+				fmt.Printf("[%s] screenshot failed: %v\n", serial, err)
+				continue
+			}
+			out, err := adb.Pull(context.Background(), serial, remote, local)
+			if err != nil { fmt.Printf("[%s] pull failed: %v\n", serial, err) } else { fmt.Printf("[%s] %s %s\n", serial, strings.TrimSpace(out), local) }
+			_, _ = adb.Run(serial, "shell", "rm", "-f", remote)
+		default:
+			out, err := adb.RunContext(context.Background(), serial, "shell", "getprop", "ro.product.model")
+			if err != nil { fmt.Printf("[%s] ERROR: %v\n", serial, err) } else { fmt.Printf("[%s] %s\n", serial, strings.TrimSpace(out)) }
 		}
-		out, err := adb.RunContext(context.Background(), serial, "shell", "getprop", "ro.product.model")
-		if err != nil { fmt.Printf("[%s] ERROR: %v\n", serial, err) } else { fmt.Printf("[%s] %s\n", serial, strings.TrimSpace(out)) }
 	}
 	ui.Pause()
 }
