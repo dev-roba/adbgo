@@ -28,6 +28,9 @@ func ConfigDir() (string, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", err
 	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		return "", fmt.Errorf("secure config directory permissions: %w", err)
+	}
 	return dir, nil
 }
 
@@ -51,6 +54,9 @@ func Load() (*Config, error) {
 			return &Config{Devices: []Device{}}, nil
 		}
 		return nil, err
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		return nil, fmt.Errorf("secure config file permissions: %w", err)
 	}
 
 	var cfg Config
