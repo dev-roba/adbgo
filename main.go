@@ -20,6 +20,21 @@ import (
 var version = "dev"
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "--version", "-v", "version":
+			fmt.Printf("adbgo %s\n", version)
+			return
+		case "--help", "-h", "help":
+			fmt.Println("adbgo — terminal Android device toolkit")
+			fmt.Println("Usage: adbgo [--version | --help]")
+			fmt.Println("Run without arguments to open the interactive terminal UI.")
+			return
+		default:
+			fmt.Fprintf(os.Stderr, "unknown argument: %s\\nUse --help for usage.\\n", os.Args[1])
+			os.Exit(2)
+		}
+	}
 	// Check adb is available
 	if _, err := exec.LookPath("adb"); err != nil {
 		ui.PrintError("adb not found in PATH. Install android-tools first.")
