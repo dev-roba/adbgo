@@ -38,6 +38,12 @@ func CheckPassword(hash, password string) bool {
 }
 
 func Signup(cfg *config.Config, serial, name, password string) (*Session, error) {
+	if len(password) < 10 {
+		return nil, fmt.Errorf("password must be at least 10 characters")
+	}
+	if serial == "" {
+		return nil, fmt.Errorf("device serial is required")
+	}
 	if name == "" {
 		name = serial
 	}
