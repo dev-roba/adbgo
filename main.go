@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"strings"
 	"time"
 
@@ -641,32 +642,75 @@ func installAPK(session *auth.Session) {
 
 func fileManager(session *auth.Session) {
 	serial := session.Device.Serial
+	current := "/sdcard"
 	for {
-		var remote string
-		form := huh.NewForm(huh.NewGroup(huh.NewInput().Title("Remote directory on device").Value(&remote).Placeholder("/sdcard")))
-		if form.Run() != nil { return }
-		if remote == "" { remote = "/sdcard" }
-		out, err := adb.RunContext(context.Background(), serial, "shell", "ls", "-la", remote)
-		if err != nil { ui.PrintError(err.Error()); ui.Pause(); continue }
-		fmt.Println(out)
-		var action string
-		form = huh.NewForm(huh.NewGroup(huh.NewSelect[string]().Title("File action").Options(huh.NewOption("Pull remote file/folder to this PC", "pull"), huh.NewOption("Push local file to this directory", "push"), huh.NewOption("Browse another directory", "browse"), huh.NewOption("Back", "back")).Value(&action)))
-		if form.Run() != nil || action == "back" { return }
-		if action == "browse" { continue }
-		var path string
-		form = huh.NewForm(huh.NewGroup(huh.NewInput().Title("Full "+map[bool]string{true:"remote path",false:"local path"}[action=="pull"]).Value(&path)))
-		if form.Run() != nil || strings.TrimSpace(path)=="" { continue }
-		var local, device string
-		if action == "pull" {
-			device = path
-			fmt.Print("Local destination path: "); if _, err := fmt.Scanln(&local); err != nil { continue }
-			out, err = adb.Pull(context.Background(), serial, device, local)
-		} else {
-			local = path
-			fmt.Print("Remote destination path: "); if _, err := fmt.Scanln(&device); err != nil { continue }
-			out, err = adb.Push(context.Background(), serial, local, device)
+		if !strings.HasPrefix(current, "/sdcard") || strings.ContainsAny(current, " \t\r\n;&|$<>\\\"'") {
+			ui.PrintError("For safety, browse paths under /sdcard without shell-special characters.")
+			current = "/sdcard"
 		}
-		fmt.Println(out); if err != nil { ui.PrintError(err.Error()) } else { ui.PrintSuccess("Transfer completed.") }; ui.Pause()
+		out, err := adb.RunContext(context.Background(), serial, "shell", "ls", "-1Ap", current)
+		if err != nil {
+			ui.PrintError("Could not list " + current + ": " + err.Error())
+			ui.Pause()
+			return
+		}
+		options := []huh.Option[string]{
+			huh.NewOption(".. (parent directory)", "__parent"),
+		}
+		for _, entry := range strings.Split(out, "\n") {
+			entry = strings.TrimSpace(entry)
+			if entry == "" || entry == "." || entry == ".." { continue }
+			options = append(options, huh.NewOption(entry, entry))
+		}
+		options = append(options,
+			huh.NewOption("Push a file from this computer into this directory", "__push"),
+			huh.NewOption("Enter another /sdcard path", "__path"),
+			huh.NewOption("Back to main menu", "__back"),
+		)
+		var selected string
+		form := huh.NewForm(huh.NewGroup(huh.NewSelect[string]().Title("Device files: "+current).Options(options...).Value(&selected)))
+		if err := form.Run(); err != nil || selected == "__back" { return }
+		switch selected {
+		case "__parent":
+			parent := path.Dir(current)
+			if parent == "/" || parent == "." { parent = "/sdcard" }
+			current = parent
+			continue
+		case "__path":
+			var next string
+			form = huh.NewForm(huh.NewGroup(huh.NewInput().Title("Directory under /sdcard").Placeholder("/sdcard/Download").Value(&next)))
+			if form.Run() != nil { continue }
+			next = strings.TrimSpace(next)
+			if !strings.HasPrefix(next, "/sdcard") || strings.ContainsAny(next, " \t\r\n;&|$<>\\\"'") {
+				ui.PrintError("Enter a safe absolute path under /sdcard.")
+				ui.Pause()
+				continue
+			}
+			current = path.Clean(next)
+			continue
+		case "__push":
+			var local string
+			form = huh.NewForm(huh.NewGroup(huh.NewInput().Title("Local file path").Placeholder("/home/user/Downloads/file.zip").Value(&local)))
+			if form.Run() != nil || strings.TrimSpace(local) == "" { continue }
+			remote := path.Join(current, path.Base(strings.TrimSpace(local)))
+			out, err := adb.Push(context.Background(), serial, strings.TrimSpace(local), remote)
+			fmt.Println(out)
+			if err != nil { ui.PrintError("Push failed: "+err.Error()) } else { ui.PrintSuccess("Pushed file to "+remote) }
+			ui.Pause()
+			continue
+		}
+		if strings.HasSuffix(selected, "/") {
+			current = path.Join(current, strings.TrimSuffix(selected, "/"))
+			continue
+		}
+		remote := path.Join(current, selected)
+		var local string
+		form = huh.NewForm(huh.NewGroup(huh.NewInput().Title("Save remote item to local path").Placeholder("./"+selected).Value(&local)))
+		if form.Run() != nil || strings.TrimSpace(local) == "" { continue }
+		out, err = adb.Pull(context.Background(), serial, remote, strings.TrimSpace(local))
+		fmt.Println(out)
+		if err != nil { ui.PrintError("Pull failed: "+err.Error()) } else { ui.PrintSuccess("Pulled "+remote+" to "+strings.TrimSpace(local)) }
+		ui.Pause()
 	}
 }
 
