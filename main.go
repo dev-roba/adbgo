@@ -17,6 +17,8 @@ import (
 	"github.com/charmbracelet/huh"
 )
 
+var version = "dev"
+
 func main() {
 	// Check adb is available
 	if _, err := exec.LookPath("adb"); err != nil {
