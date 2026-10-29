@@ -2,6 +2,7 @@ package danger
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -127,8 +128,10 @@ func FullRootShell(serial string) error {
 		return nil
 	}
 	cmd := exec.Command("adb", "-s", serial, "shell")
-	cmd.Stdin = nil
-	ui.PrintWarning("Starting shell. Type 'su' for root if available. Type 'exit' to return.")
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	ui.PrintWarning("Starting shell. Type 'su' for root if available and authorized. Type 'exit' to return.")
 	return cmd.Run()
 }
 
