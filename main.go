@@ -508,9 +508,6 @@ func showDangerZone(session *auth.Session) {
 					huh.NewOption("Wipe Cache", "cache"),
 					huh.NewOption("Unlock Bootloader", "unlock"),
 					huh.NewOption("Lock Bootloader", "lock"),
-					huh.NewOption("Remove Screen Lock", "lockscreen"),
-					huh.NewOption("Attempt Disable FRP", "frp"),
-					huh.NewOption("Format /data", "format_data"),
 					huh.NewOption("Interactive Root Shell", "root"),
 					huh.NewOption("Raw adb command", "raw_adb"),
 					huh.NewOption("Raw fastboot command", "raw_fastboot"),
@@ -533,12 +530,6 @@ func showDangerZone(session *auth.Session) {
 		err = danger.UnlockBootloader(serial)
 	case "lock":
 		err = danger.LockBootloader(serial)
-	case "lockscreen":
-		err = danger.RemoveScreenLock(serial)
-	case "frp":
-		err = danger.DisableFRP(serial)
-	case "format_data":
-		err = danger.FormatData(serial)
 	case "root":
 		err = danger.FullRootShell(serial)
 	case "raw_adb":
