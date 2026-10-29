@@ -509,8 +509,7 @@ func showDangerZone(session *auth.Session) {
 			huh.NewSelect[string]().
 				Title(ui.WarningStyle.Render("DANGER ZONE — NUCLEAR OPTIONS")).
 				Options(
-					huh.NewOption("Factory Reset / Wipe Data", "factory"),
-					huh.NewOption("Wipe Cache", "cache"),
+					huh.NewOption("Reboot to Recovery (manual recovery menu)", "recovery"),
 					huh.NewOption("Unlock Bootloader", "unlock"),
 					huh.NewOption("Lock Bootloader", "lock"),
 					huh.NewOption("Interactive Root Shell", "root"),
@@ -527,10 +526,8 @@ func showDangerZone(session *auth.Session) {
 	var err error
 
 	switch choice {
-	case "factory":
-		err = danger.FactoryReset(serial)
-	case "cache":
-		err = danger.WipeCache(serial)
+	case "recovery":
+		err = adb.Reboot(serial, "recovery")
 	case "unlock":
 		err = danger.UnlockBootloader(serial)
 	case "lock":
