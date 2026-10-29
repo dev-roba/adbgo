@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -247,6 +248,13 @@ func showMainMenu(cfg *config.Config, session *auth.Session) {
 			huh.NewOption("Device Control", "device"),
 			huh.NewOption("App Management", "apps"),
 			huh.NewOption("File & System", "files"),
+			huh.NewOption("Wireless ADB", "wireless"),
+			huh.NewOption("Live Logcat", "logcat"),
+			huh.NewOption("Install APK", "install_apk"),
+			huh.NewOption("Device File Manager", "file_manager"),
+			huh.NewOption("Screen Recording", "record"),
+			huh.NewOption("Multi-device Tools", "multi"),
+			huh.NewOption("Manage Registered Devices", "manage_devices"),
 		}
 
 		if session.GodMode {
@@ -295,6 +303,20 @@ func showMainMenu(cfg *config.Config, session *auth.Session) {
 
 		case "files":
 			showFileSystem(session)
+		case "wireless":
+			wirelessADB(session)
+		case "logcat":
+			showLogcat(session)
+		case "install_apk":
+			installAPK(session)
+		case "file_manager":
+			fileManager(session)
+		case "record":
+			recordScreen(session)
+		case "multi":
+			multiDeviceTools()
+		case "manage_devices":
+			manageRegisteredDevices(cfg, session)
 
 		case "god":
 			enableGodMode(session)
@@ -318,17 +340,22 @@ func showMainMenu(cfg *config.Config, session *auth.Session) {
 }
 
 func enableGodMode(session *auth.Session) {
-	ui.PrintWarning("You are about to enable GOD MODE.")
-	ui.PrintWarning("This unlocks factory reset, bootloader unlock, FRP tools, etc.")
+	ui.PrintWarning("GOD MODE exposes destructive device operations.")
+	var password string
+	form := huh.NewForm(huh.NewGroup(huh.NewInput().Title("Re-enter your adbgo password").EchoMode(huh.EchoModePassword).Value(&password)))
+	if err := form.Run(); err != nil { return }
+	if !auth.CheckPassword(session.Device.Password, password) {
+		ui.PrintError("Incorrect password; GOD MODE remains disabled")
+		ui.Pause()
+		return
+	}
+	ui.PrintWarning("Only use on a device you own or are authorized to administer.")
 	fmt.Print("Type YES to enable GOD MODE: ")
 	var input string
-	fmt.Scanln(&input)
-	if strings.TrimSpace(input) == "YES" {
+	if _, err := fmt.Scanln(&input); err == nil && strings.TrimSpace(input) == "YES" {
 		session.GodMode = true
-		ui.PrintSuccess("GOD MODE ENABLED")
-	} else {
-		ui.PrintError("Cancelled")
-	}
+		ui.PrintSuccess("GOD MODE enabled for this session")
+	} else { ui.PrintError("Cancelled") }
 	time.Sleep(800 * time.Millisecond)
 }
 
@@ -535,4 +562,167 @@ func doExport(cfg *config.Config) {
 func doImport(cfg *config.Config) {
 	ui.PrintWarning("Place your devices.json into ~/.config/adbgo/ then restart adbgo.")
 	ui.Pause()
+}
+
+
+// pickLocalFile uses a native file chooser when available, with a terminal fallback.
+func pickLocalFile(title string) string {
+	for _, chooser := range []string{"zenity", "kdialog"} {
+		if _, err := exec.LookPath(chooser); err != nil { continue }
+		var cmd *exec.Cmd
+		if chooser == "zenity" { cmd = exec.Command(chooser, "--file-selection", "--title="+title, "--file-filter=APK files | *.apk") } else { cmd = exec.Command(chooser, "--getopenfilename", ".", "*.apk") }
+		out, err := cmd.Output()
+		if err == nil { return strings.TrimSpace(string(out)) }
+		return ""
+	}
+	var path string
+	form := huh.NewForm(huh.NewGroup(huh.NewInput().Title(title+" (full path)").Placeholder("/home/user/app.apk").Value(&path)))
+	if form.Run() != nil { return "" }
+	return strings.TrimSpace(path)
+}
+
+func wirelessADB(session *auth.Session) {
+	devices, err := adb.ListDevices()
+	if err != nil { ui.PrintError(err.Error()); ui.Pause(); return }
+	var options []huh.Option[string]
+	for _, d := range devices { if d.Status == "device" && !strings.Contains(d.Serial, ":") { options = append(options, huh.NewOption(d.Serial+" ("+d.Model+")", d.Serial)) } }
+	if len(options) == 0 { ui.PrintError("Connect and authorize the phone over USB first."); ui.Pause(); return }
+	serial := session.Device.Serial
+	if !adb.IsConnected(serial) || strings.Contains(serial, ":") {
+		form := huh.NewForm(huh.NewGroup(huh.NewSelect[string]().Title("USB-connected device").Options(options...).Value(&serial)))
+		if form.Run() != nil { return }
+	}
+	var hostPort string
+	form := huh.NewForm(huh.NewGroup(huh.NewInput().Title("Phone Wi-Fi IP:port").Placeholder("192.168.1.20:5555").Value(&hostPort)))
+	if form.Run() != nil { return }
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second); defer cancel()
+	if err := adb.ConnectTCPIP(ctx, serial, hostPort); err != nil { ui.PrintError(err.Error()) } else { ui.PrintSuccess("Wireless ADB connected: "+hostPort); ui.PrintWarning("On modern Android, prefer Settings → Developer options → Wireless debugging → Pair device.") }
+	ui.Pause()
+}
+
+func showLogcat(session *auth.Session) {
+	var priority, pkg string
+	form := huh.NewForm(huh.NewGroup(
+		huh.NewSelect[string]().Title("Minimum log priority").Options(huh.NewOption("Verbose", "V"), huh.NewOption("Debug", "D"), huh.NewOption("Info", "I"), huh.NewOption("Warning", "W"), huh.NewOption("Error", "E"), huh.NewOption("Fatal", "F")).Value(&priority),
+		huh.NewInput().Title("Package filter (optional; matches log lines)").Placeholder("com.example.app").Value(&pkg),
+	))
+	if form.Run() != nil { return }
+	ui.PrintWarning("Streaming Logcat for up to 5 minutes; press Ctrl+C to stop.")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute); defer cancel()
+	if err := adb.StreamLogcat(ctx, session.Device.Serial, priority, strings.TrimSpace(pkg), os.Stdout); err != nil { ui.PrintError(err.Error()) }
+	ui.Pause()
+}
+
+func installAPK(session *auth.Session) {
+	path := pickLocalFile("Select APK to install")
+	if path == "" { ui.PrintWarning("No APK selected."); return }
+	var confirm string
+	form := huh.NewForm(huh.NewGroup(huh.NewConfirm().Title("Install or replace app from "+path+"?").Affirmative("Install").Negative("Cancel").Value(new(bool))))
+	_ = form
+	// Installation can replace an existing package; require a typed confirmation.
+	fmt.Print("Type INSTALL to install this APK on "+session.Device.Serial+": ")
+	if _, err := fmt.Scanln(&confirm); err != nil || confirm != "INSTALL" { ui.PrintWarning("Cancelled."); return }
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute); defer cancel()
+	out, err := adb.InstallAPK(ctx, session.Device.Serial, path)
+	fmt.Println(out)
+	if err != nil { ui.PrintError(err.Error()) } else { ui.PrintSuccess("APK installed successfully.") }
+	ui.Pause()
+}
+
+func fileManager(session *auth.Session) {
+	serial := session.Device.Serial
+	for {
+		var remote string
+		form := huh.NewForm(huh.NewGroup(huh.NewInput().Title("Remote directory on device").Value(&remote).Placeholder("/sdcard")))
+		if form.Run() != nil { return }
+		if remote == "" { remote = "/sdcard" }
+		out, err := adb.RunContext(context.Background(), serial, "shell", "ls", "-la", remote)
+		if err != nil { ui.PrintError(err.Error()); ui.Pause(); continue }
+		fmt.Println(out)
+		var action string
+		form = huh.NewForm(huh.NewGroup(huh.NewSelect[string]().Title("File action").Options(huh.NewOption("Pull remote file/folder to this PC", "pull"), huh.NewOption("Push local file to this directory", "push"), huh.NewOption("Browse another directory", "browse"), huh.NewOption("Back", "back")).Value(&action)))
+		if form.Run() != nil || action == "back" { return }
+		if action == "browse" { continue }
+		var path string
+		form = huh.NewForm(huh.NewGroup(huh.NewInput().Title("Full "+map[bool]string{true:"remote path",false:"local path"}[action=="pull"]).Value(&path)))
+		if form.Run() != nil || strings.TrimSpace(path)=="" { continue }
+		var local, device string
+		if action == "pull" {
+			device = path
+			fmt.Print("Local destination path: "); if _, err := fmt.Scanln(&local); err != nil { continue }
+			out, err = adb.Pull(context.Background(), serial, device, local)
+		} else {
+			local = path
+			fmt.Print("Remote destination path: "); if _, err := fmt.Scanln(&device); err != nil { continue }
+			out, err = adb.Push(context.Background(), serial, local, device)
+		}
+		fmt.Println(out); if err != nil { ui.PrintError(err.Error()) } else { ui.PrintSuccess("Transfer completed.") }; ui.Pause()
+	}
+}
+
+func recordScreen(session *auth.Session) {
+	var seconds int
+	seconds = 60
+	var duration string
+	form := huh.NewForm(huh.NewGroup(huh.NewInput().Title("Recording duration in seconds (1–180)").Value(&duration).Placeholder("60")))
+	if form.Run() == nil && duration != "" { if _, err := fmt.Sscanf(duration, "%d", &seconds); err != nil { ui.PrintError("Invalid duration"); return } }
+	if seconds < 1 || seconds > 180 { ui.PrintError("Duration must be 1–180 seconds."); ui.Pause(); return }
+	stamp := time.Now().Format("20060102-150405")
+	remote := "/sdcard/adbgo-recording-"+stamp+".mp4"
+	local := "adbgo-recording-"+stamp+".mp4"
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(seconds+30)*time.Second); defer cancel()
+	cmd, err := adb.StartScreenRecording(ctx, session.Device.Serial, remote, seconds)
+	if err != nil { ui.PrintError(err.Error()); ui.Pause(); return }
+	ui.PrintSuccess(fmt.Sprintf("Recording started (maximum %d seconds). Wait for recording to finish…", seconds))
+	if err := cmd.Wait(); err != nil { ui.PrintError("Recording command ended with an error: "+err.Error()); ui.Pause(); return }
+	out, err := adb.Pull(ctx, session.Device.Serial, remote, local)
+	fmt.Println(out); if err != nil { ui.PrintError(err.Error()) } else { ui.PrintSuccess("Recording saved to "+local) }
+	_, _ = adb.Run(session.Device.Serial, "shell", "rm", "-f", remote)
+	ui.Pause()
+}
+
+func multiDeviceTools() {
+	devices, err := adb.ListDevices()
+	if err != nil { ui.PrintError(err.Error()); ui.Pause(); return }
+	var opts []huh.Option[string]
+	for _, d := range devices { if d.Status == "device" { opts = append(opts, huh.NewOption(d.Serial+" ("+d.Model+")", d.Serial)) } }
+	if len(opts) < 2 { ui.PrintWarning("Connect at least two authorized devices for multi-device mode."); ui.Pause(); return }
+	var selected []string
+	form := huh.NewForm(huh.NewGroup(huh.NewMultiSelect[string]().Title("Select devices (read-only info action)").Options(opts...).Value(&selected)))
+	if form.Run() != nil || len(selected) == 0 { return }
+	for _, serial := range selected {
+		out, err := adb.RunContext(context.Background(), serial, "shell", "getprop", "ro.product.model")
+		if err != nil { fmt.Printf("[%s] ERROR: %v\n", serial, err) } else { fmt.Printf("[%s] %s\n", serial, strings.TrimSpace(out)) }
+	}
+	ui.Pause()
+}
+
+func manageRegisteredDevices(cfg *config.Config, session *auth.Session) {
+	for {
+		if len(cfg.Devices) == 0 { ui.PrintWarning("No registered devices."); ui.Pause(); return }
+		opts := make([]huh.Option[string], 0, len(cfg.Devices)+1)
+		for _, d := range cfg.Devices { opts = append(opts, huh.NewOption(d.Name+" ("+d.Serial+")", d.Serial)) }
+		opts = append(opts, huh.NewOption("Back", "back"))
+		var serial string
+		form := huh.NewForm(huh.NewGroup(huh.NewSelect[string]().Title("Registered devices").Options(opts...).Value(&serial)))
+		if form.Run() != nil || serial == "back" { return }
+		device := cfg.FindBySerial(serial); if device == nil { continue }
+		var action string
+		form = huh.NewForm(huh.NewGroup(huh.NewSelect[string]().Title("Manage "+device.Name).Options(huh.NewOption("Rename", "rename"), huh.NewOption("Delete registration", "delete"), huh.NewOption("Back", "back")).Value(&action)))
+		if form.Run() != nil || action == "back" { continue }
+		if action == "rename" {
+			var name string
+			form = huh.NewForm(huh.NewGroup(huh.NewInput().Title("New friendly name").Value(&name)))
+			if form.Run() != nil || strings.TrimSpace(name)=="" { continue }
+			device.Name = strings.TrimSpace(name)
+		} else {
+			if serial == session.Device.Serial { ui.PrintError("Log out or switch devices before deleting the active session's registration."); ui.Pause(); continue }
+			var yes bool
+			form = huh.NewForm(huh.NewGroup(huh.NewConfirm().Title("Delete registration for "+serial+"? This does not modify the phone.").Value(&yes)))
+			if form.Run() != nil || !yes { continue }
+			cfg.RemoveDevice(serial)
+		}
+		if err := cfg.Save(); err != nil { ui.PrintError("Failed to save device registry: "+err.Error()) } else { ui.PrintSuccess("Device registry updated.") }
+		ui.Pause()
+	}
 }
