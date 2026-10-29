@@ -9,9 +9,9 @@
 - Password-based local login and registered-device profiles
 - Interactive device selection and registration management (rename/remove)
 - USB-to-Wi-Fi ADB connection helper for legacy TCP/IP debugging
-- Live Logcat with priority selection and optional text/package-name filtering
+- Live Logcat with priority selection and real process-ID filtering for a running package
 - APK installation with a local file chooser when `zenity` or `kdialog` is installed
-- Browse remote directories and push/pull files
+- Interactively browse `/sdcard` directories and push/pull selected files or folders
 - Bounded screen recording with automatic pull to the computer
 - Multi-device diagnostics and explicitly confirmed reboot actions with per-device results
 - scrcpy launch, screenshots, device controls, and app/package management
@@ -39,8 +39,10 @@ git clone https://github.com/dev-roba/adbgo.git
 cd adbgo
 go mod tidy
 go test ./...
+go vet ./...
 go build -o adbgo .
 ./adbgo
+./adbgo --version
 ```
 
 ## Wireless ADB
