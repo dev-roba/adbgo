@@ -1,6 +1,7 @@
 package danger
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
@@ -137,9 +138,9 @@ func FullRootShell(serial string) error {
 
 func RawADB(serial string) error {
 	fmt.Print("Enter raw adb arguments (without 'adb -s serial'): ")
-	var line string
-	fmt.Scanln(&line)
-	if strings.TrimSpace(line) == "" {
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	line = strings.TrimSpace(line)
+	if line == "" {
 		return nil
 	}
 	args := strings.Fields(line)
@@ -153,8 +154,9 @@ func RawFastboot(serial string) error {
 		return nil
 	}
 	fmt.Print("Enter fastboot arguments: ")
-	var line string
-	fmt.Scanln(&line)
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	line = strings.TrimSpace(line)
+	if line == "" { return nil }
 	args := strings.Fields(line)
 	cmdArgs := append([]string{"-s", serial}, args...)
 	cmd := exec.Command("fastboot", cmdArgs...)
