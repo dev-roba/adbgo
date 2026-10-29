@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 type DeviceInfo struct {
@@ -89,18 +90,6 @@ func Run(serial string, args ...string) (string, error) {
 	return out.String(), err
 }
 
-// RunInteractive runs adb command attached to current terminal (for shell, scrcpy, etc.)
-func RunInteractive(serial string, args ...string) error {
-	fullArgs := append([]string{"-s", serial}, args...)
-	cmd := exec.Command("adb", fullArgs...)
-	cmd.Stdin = nil
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	// We let the command inherit the terminal for interactive use
-	cmd.Stdin = nil
-	return cmd.Run()
-}
-
 // StartScrcpy launches scrcpy for the device (blocking until scrcpy exits)
 func StartScrcpy(serial string, extraArgs ...string) error {
 	args := []string{"--serial", serial}
@@ -119,5 +108,54 @@ func Reboot(serial, mode string) error {
 		args = []string{"reboot", mode}
 	}
 	_, err := Run(serial, args...)
+	return err
+}
+
+// WakeScreen wakes the device screen
+func WakeScreen(serial string) error {
+	_, err := Run(serial, "shell", "input", "keyevent", "KEYCODE_WAKEUP")
+	return err
+}
+
+// SwipeUp performs a swipe up gesture (to reveal lock screen)
+func SwipeUp(serial string) error {
+	// Generic swipe from bottom to middle (works on most phones)
+	_, err := Run(serial, "shell", "input", "swipe", "300", "1500", "300", "800", "300")
+	return err
+}
+
+// UnlockWithPassword wakes, swipes, types the password and presses Enter
+func UnlockWithPassword(serial, password string) error {
+	// 1. Wake
+	if err := WakeScreen(serial); err != nil {
+		return err
+	}
+	time.Sleep(400 * time.Millisecond)
+
+	// 2. Swipe up
+	if err := SwipeUp(serial); err != nil {
+		return err
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	// 3. Type password
+	_, err := Run(serial, "shell", "input", "text", password)
+	if err != nil {
+		return err
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	// 4. Press Enter
+	_, err = Run(serial, "shell", "input", "keyevent", "66") // KEYCODE_ENTER
+	return err
+}
+
+// LockScreen locks the device
+func LockScreen(serial string) error {
+	// Prefer KEYCODE_SLEEP, fallback to POWER
+	_, err := Run(serial, "shell", "input", "keyevent", "KEYCODE_SLEEP")
+	if err != nil {
+		_, err = Run(serial, "shell", "input", "keyevent", "26") // POWER
+	}
 	return err
 }
