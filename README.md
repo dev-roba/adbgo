@@ -13,7 +13,7 @@
 - APK installation with a local file chooser when `zenity` or `kdialog` is installed
 - Browse remote directories and push/pull files
 - Bounded screen recording with automatic pull to the computer
-- Multi-device read-only diagnostics with per-device results
+- Multi-device diagnostics and explicitly confirmed reboot actions with per-device results
 - scrcpy launch, screenshots, device controls, and app/package management
 - Extra-dangerous actions gated behind GOD MODE, password re-entry, and explicit confirmation
 
