@@ -617,8 +617,6 @@ func installAPK(session *auth.Session) {
 	path := pickLocalFile("Select APK to install")
 	if path == "" { ui.PrintWarning("No APK selected."); return }
 	var confirm string
-	form := huh.NewForm(huh.NewGroup(huh.NewConfirm().Title("Install or replace app from "+path+"?").Affirmative("Install").Negative("Cancel").Value(new(bool))))
-	_ = form
 	// Installation can replace an existing package; require a typed confirmation.
 	fmt.Print("Type INSTALL to install this APK on "+session.Device.Serial+": ")
 	if _, err := fmt.Scanln(&confirm); err != nil || confirm != "INSTALL" { ui.PrintWarning("Cancelled."); return }
