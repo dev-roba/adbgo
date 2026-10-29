@@ -112,7 +112,10 @@ func StreamLogcat(ctx context.Context, serial, priority, packageName string, dst
 		if len(pids) == 0 {
 			return fmt.Errorf("no running process found for package %q", packageName)
 		}
-		args = append(args, "--pid="+strings.Join(pids, ","))
+		for _, pid := range pids {
+			if _, err := strconv.Atoi(pid); err != nil { return fmt.Errorf("device returned an invalid PID for %q", packageName) }
+			args = append(args, "--pid="+pid)
+		}
 	}
 	args = append(args, "*:"+priority)
 	cmd := exec.CommandContext(ctx, "adb", args...)
