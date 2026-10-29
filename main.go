@@ -157,8 +157,8 @@ func doSignup(cfg *config.Config) *auth.Session {
 		ui.Pause()
 		return nil
 	}
-	if len(password) < 4 {
-		ui.PrintError("Password too short (min 4 characters)")
+	if len(password) < 10 {
+		ui.PrintError("Password too short (min 10 characters)")
 		ui.Pause()
 		return nil
 	}
