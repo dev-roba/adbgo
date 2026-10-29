@@ -6,9 +6,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
+	"strconv"
 	"time"
 )
 
@@ -20,19 +22,26 @@ func RunContext(ctx context.Context, serial string, args ...string) (string, err
 	}
 	fullArgs := append([]string{"-s", serial}, args...)
 	cmd := exec.CommandContext(ctx, "adb", fullArgs...)
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
-	if err := cmd.Run(); err != nil {
-		return out.String(), fmt.Errorf("adb %s failed: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(out.String()))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("adb %s failed: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
-	return out.String(), nil
+	return string(out), nil
 }
 
 // ConnectTCPIP enables the legacy ADB-over-TCP mode on an already authorized
 // USB-connected device, then connects to the supplied Wi-Fi address.
 func ConnectTCPIP(ctx context.Context, serial, hostPort string) error {
-	if strings.TrimSpace(serial) == "" || strings.TrimSpace(hostPort) == "" || strings.ContainsAny(hostPort, " \t\r\n/") {
-		return fmt.Errorf("select a USB device and enter an address such as 192.168.1.20:5555")
+	if strings.TrimSpace(serial) == "" {
+		return fmt.Errorf("select a USB-connected device first")
+	}
+	host, portText, err := net.SplitHostPort(strings.TrimSpace(hostPort))
+	if err != nil || host == "" || strings.ContainsAny(host, " \t\r\n/") {
+		return fmt.Errorf("enter a valid phone address such as 192.168.1.20:5555")
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("port must be a number from 1 to 65535")
 	}
 	if _, err := RunContext(ctx, serial, "tcpip", "5555"); err != nil {
 		return err
@@ -63,12 +72,14 @@ func InstallAPK(ctx context.Context, serial, path string) (string, error) {
 
 // Push and Pull transfer a file and verify the local side where possible.
 func Push(ctx context.Context, serial, localPath, remotePath string) (string, error) {
+	if strings.TrimSpace(remotePath) == "" { return "", fmt.Errorf("remote destination path is required") }
 	if _, err := os.Stat(localPath); err != nil {
 		return "", fmt.Errorf("local source is unavailable: %w", err)
 	}
 	return RunContext(ctx, serial, "push", localPath, remotePath)
 }
 func Pull(ctx context.Context, serial, remotePath, localPath string) (string, error) {
+	if strings.TrimSpace(remotePath) == "" || strings.TrimSpace(localPath) == "" { return "", fmt.Errorf("remote source and local destination paths are required") }
 	out, err := RunContext(ctx, serial, "pull", remotePath, localPath)
 	if err != nil { return out, err }
 	if _, statErr := os.Stat(localPath); statErr != nil {
