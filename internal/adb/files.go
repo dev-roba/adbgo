@@ -2,6 +2,7 @@ package adb
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"

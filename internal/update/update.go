@@ -53,7 +53,16 @@ func Latest() (string, error) {
 
 // IsNewer reports whether latest (e.g. "v1.2.0") is newer than current.
 func IsNewer(latest, current string) bool {
-	return semver(latest) > semver(current)
+	a, b := semver(latest), semver(current)
+	for i := 0; i < 3; i++ {
+		if a[i] > b[i] {
+			return true
+		}
+		if a[i] < b[i] {
+			return false
+		}
+	}
+	return false
 }
 
 // semver turns "v1.2.3-rc1" into a comparable [3]int (missing parts = 0).
