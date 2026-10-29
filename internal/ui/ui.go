@@ -1,11 +1,20 @@
 package ui
 
 import (
+	"bufio"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 )
+
+// ReadLine reads a full line from stdin (handles spaces, unlike fmt.Scanln).
+func ReadLine() string {
+	r := bufio.NewReader(os.Stdin)
+	line, _ := r.ReadString('\n')
+	return strings.TrimSpace(line)
+}
 
 var (
 	// Colors
@@ -89,7 +98,11 @@ func PrintWarning(msg string) {
 	fmt.Println(WarningStyle.Render("⚠ " + msg))
 }
 
+func PrintInfo(msg string) {
+	fmt.Println(DimStyle.Render("  " + msg))
+}
+
 func Pause() {
 	fmt.Print(DimStyle.Render("\nPress Enter to continue..."))
-	fmt.Scanln()
+	ReadLine()
 }

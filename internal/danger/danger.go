@@ -2,8 +2,10 @@ package danger
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"adbgo/internal/adb"
 	"adbgo/internal/ui"
@@ -13,9 +15,7 @@ import (
 func ConfirmYES(action string) bool {
 	ui.PrintWarning("DANGEROUS ACTION: " + action)
 	fmt.Print("Type YES to confirm: ")
-	var input string
-	fmt.Scanln(&input)
-	return strings.TrimSpace(input) == "YES"
+	return strings.TrimSpace(adb.ReadLine()) == "YES"
 }
 
 // ConfirmYESWithSerial requires YES + serial match
@@ -23,15 +23,11 @@ func ConfirmYESWithSerial(action, serial string) bool {
 	ui.PrintWarning("EXTREME DANGER: " + action)
 	fmt.Printf("This targets device: %s\n", serial)
 	fmt.Print("Type YES to continue: ")
-	var input string
-	fmt.Scanln(&input)
-	if strings.TrimSpace(input) != "YES" {
+	if strings.TrimSpace(adb.ReadLine()) != "YES" {
 		return false
 	}
 	fmt.Print("Now type the device serial to double-confirm: ")
-	var serialInput string
-	fmt.Scanln(&serialInput)
-	return strings.TrimSpace(serialInput) == serial
+	return strings.TrimSpace(adb.ReadLine()) == serial
 }
 
 func FactoryReset(serial string) error {
@@ -45,6 +41,9 @@ func FactoryReset(serial string) error {
 		_, err = adb.Run(serial, "shell", "am", "broadcast", "-a", "android.intent.action.MASTER_CLEAR")
 	}
 	fmt.Println(out)
+	if err != nil {
+		ui.PrintError("Factory reset command failed. On most modern devices you need to reboot to recovery and wipe from there.")
+	}
 	return err
 }
 
@@ -54,6 +53,9 @@ func WipeCache(serial string) error {
 		return nil
 	}
 	_, err := adb.Run(serial, "shell", "recovery", "--wipe_cache")
+	if err != nil {
+		ui.PrintError("Wipe cache failed. On most devices this only works from recovery mode.")
+	}
 	return err
 }
 
@@ -65,8 +67,13 @@ func UnlockBootloader(serial string) error {
 	if err := adb.Reboot(serial, "bootloader"); err != nil {
 		return err
 	}
-	ui.PrintWarning("Device rebooting to bootloader... waiting a few seconds")
+	ui.PrintWarning("Waiting for device to enter fastboot (up to 60s)...")
+	if !adb.WaitForFastboot(serial, 60*time.Second) {
+		ui.PrintError("Device did not show up in fastboot. Run 'fastboot devices' to check.")
+		return nil
+	}
 	cmd := exec.Command("fastboot", "-s", serial, "flashing", "unlock")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return cmd.Run()
 }
 
@@ -78,7 +85,13 @@ func LockBootloader(serial string) error {
 	if err := adb.Reboot(serial, "bootloader"); err != nil {
 		return err
 	}
+	ui.PrintWarning("Waiting for device to enter fastboot (up to 60s)...")
+	if !adb.WaitForFastboot(serial, 60*time.Second) {
+		ui.PrintError("Device did not show up in fastboot. Run 'fastboot devices' to check.")
+		return nil
+	}
 	cmd := exec.Command("fastboot", "-s", serial, "flashing", "lock")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return cmd.Run()
 }
 
@@ -87,16 +100,16 @@ func RemoveScreenLock(serial string) error {
 		ui.PrintError("Cancelled")
 		return nil
 	}
+	ui.PrintWarning("Note: this only works on rooted devices (or very old Android versions).")
 	commands := [][]string{
-		{"shell", "locksettings", "clear", "--old", "0"},
-		{"shell", "rm", "/data/system/gesture.key"},
-		{"shell", "rm", "/data/system/password.key"},
-		{"shell", "rm", "/data/system/locksettings.db*"},
+		{"shell", "locksettings", "clear", "--old", ""},
+		{"shell", "su", "-c", "rm", "-f", "/data/system/gesture.key"},
+		{"shell", "su", "-c", "rm", "-f", "/data/system/password.key"},
 	}
 	for _, args := range commands {
 		adb.Run(serial, args...)
 	}
-	ui.PrintSuccess("Attempted to remove screen lock. Reboot recommended.")
+	ui.PrintSuccess("Screen lock removal attempted. Reboot recommended.")
 	return nil
 }
 
@@ -126,17 +139,14 @@ func FullRootShell(serial string) error {
 		ui.PrintError("Cancelled")
 		return nil
 	}
-	cmd := exec.Command("adb", "-s", serial, "shell")
-	cmd.Stdin = nil
 	ui.PrintWarning("Starting shell. Type 'su' for root if available. Type 'exit' to return.")
-	return cmd.Run()
+	return adb.RunStreaming(serial, "shell")
 }
 
 func RawADB(serial string) error {
 	fmt.Print("Enter raw adb arguments (without 'adb -s serial'): ")
-	var line string
-	fmt.Scanln(&line)
-	if strings.TrimSpace(line) == "" {
+	line := adb.ReadLine()
+	if line == "" {
 		return nil
 	}
 	args := strings.Fields(line)
@@ -150,12 +160,12 @@ func RawFastboot(serial string) error {
 		return nil
 	}
 	fmt.Print("Enter fastboot arguments: ")
-	var line string
-	fmt.Scanln(&line)
-	args := strings.Fields(line)
-	cmdArgs := append([]string{"-s", serial}, args...)
+	line := adb.ReadLine()
+	if line == "" {
+		return nil
+	}
+	cmdArgs := append([]string{"-s", serial}, strings.Fields(line)...)
 	cmd := exec.Command("fastboot", cmdArgs...)
-	out, err := cmd.CombinedOutput()
-	fmt.Println(string(out))
-	return err
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	return cmd.Run()
 }

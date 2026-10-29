@@ -70,7 +70,12 @@ func (c *Config) Save() error {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0600)
+	// Write atomically so a crash never corrupts the config
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func (c *Config) FindBySerial(serial string) *Device {
@@ -82,15 +87,17 @@ func (c *Config) FindBySerial(serial string) *Device {
 	return nil
 }
 
-func (c *Config) AddDevice(d Device) {
-	// Replace if exists
+// AddDevice adds or replaces a device registration. Returns true if an
+// existing registration was overwritten.
+func (c *Config) AddDevice(d Device) bool {
 	for i := range c.Devices {
 		if c.Devices[i].Serial == d.Serial {
 			c.Devices[i] = d
-			return
+			return true
 		}
 	}
 	c.Devices = append(c.Devices, d)
+	return false
 }
 
 func (c *Config) RemoveDevice(serial string) {
@@ -101,4 +108,15 @@ func (c *Config) RemoveDevice(serial string) {
 		}
 	}
 	c.Devices = filtered
+}
+
+// RenameDevice updates the friendly name of a registered device.
+func (c *Config) RenameDevice(serial, name string) bool {
+	for i := range c.Devices {
+		if c.Devices[i].Serial == serial {
+			c.Devices[i].Name = name
+			return true
+		}
+	}
+	return false
 }

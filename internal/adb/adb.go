@@ -1,6 +1,7 @@
 package adb
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"os"
@@ -14,6 +15,13 @@ type DeviceInfo struct {
 	Status  string // device, offline, unauthorized, etc.
 	Model   string
 	Product string
+}
+
+// ReadLine reads a full line from stdin (unlike fmt.Scanln it handles spaces).
+func ReadLine() string {
+	r := bufio.NewReader(os.Stdin)
+	line, _ := r.ReadString('\n')
+	return strings.TrimSpace(line)
 }
 
 // ListDevices returns currently connected devices via `adb devices -l`
@@ -79,7 +87,8 @@ func IsConnected(serial string) bool {
 	return false
 }
 
-// Run runs an adb command for a specific device and returns combined output
+// Run runs an adb command for a specific device and returns combined output.
+// A non-zero exit code is returned as an error that includes the output.
 func Run(serial string, args ...string) (string, error) {
 	fullArgs := append([]string{"-s", serial}, args...)
 	cmd := exec.Command("adb", fullArgs...)
@@ -87,7 +96,35 @@ func Run(serial string, args ...string) (string, error) {
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	err := cmd.Run()
-	return out.String(), err
+	if err != nil {
+		return out.String(), fmt.Errorf("adb %s failed: %w\n%s", strings.Join(args, " "), err, out.String())
+	}
+	return out.String(), nil
+}
+
+// RunRaw runs an adb command without a target device (adb connect/disconnect,
+// adb start-server, ...) and returns combined output.
+func RunRaw(args ...string) (string, error) {
+	cmd := exec.Command("adb", args...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	err := cmd.Run()
+	if err != nil {
+		return out.String(), fmt.Errorf("adb %s failed: %w\n%s", strings.Join(args, " "), err, out.String())
+	}
+	return out.String(), nil
+}
+
+// RunStreaming runs an adb command with stdin/stdout/stderr wired to the
+// terminal so the user sees live output (installs, logcat, shells).
+func RunStreaming(serial string, args ...string) error {
+	fullArgs := append([]string{"-s", serial}, args...)
+	cmd := exec.Command("adb", fullArgs...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 // StartScrcpy launches scrcpy for the device (blocking until scrcpy exits)
@@ -111,42 +148,36 @@ func Reboot(serial, mode string) error {
 	return err
 }
 
+// Screenshot takes a screenshot and pulls it into the current directory.
+func Screenshot(serial string) (string, error) {
+	filename := fmt.Sprintf("screenshot-%s-%s.png", sanitize(serial), time.Now().Format("20060102-150405"))
+	remote := "/sdcard/" + filename
+	if _, err := Run(serial, "shell", "screencap", "-p", remote); err != nil {
+		return "", err
+	}
+	if _, err := Run(serial, "pull", remote, filename); err != nil {
+		return "", err
+	}
+	Run(serial, "shell", "rm", remote)
+	return filename, nil
+}
+
+// WaitForFastboot polls `fastboot devices` until the serial appears or timeout.
+func WaitForFastboot(serial string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		out, err := exec.Command("fastboot", "devices").Output()
+		if err == nil && strings.Contains(string(out), serial) {
+			return true
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return false
+}
+
 // WakeScreen wakes the device screen
 func WakeScreen(serial string) error {
 	_, err := Run(serial, "shell", "input", "keyevent", "KEYCODE_WAKEUP")
-	return err
-}
-
-// SwipeUp performs a swipe up gesture (to reveal lock screen)
-func SwipeUp(serial string) error {
-	// Generic swipe from bottom to middle (works on most phones)
-	_, err := Run(serial, "shell", "input", "swipe", "300", "1500", "300", "800", "300")
-	return err
-}
-
-// UnlockWithPassword wakes, swipes, types the password and presses Enter
-func UnlockWithPassword(serial, password string) error {
-	// 1. Wake
-	if err := WakeScreen(serial); err != nil {
-		return err
-	}
-	time.Sleep(400 * time.Millisecond)
-
-	// 2. Swipe up
-	if err := SwipeUp(serial); err != nil {
-		return err
-	}
-	time.Sleep(500 * time.Millisecond)
-
-	// 3. Type password
-	_, err := Run(serial, "shell", "input", "text", password)
-	if err != nil {
-		return err
-	}
-	time.Sleep(200 * time.Millisecond)
-
-	// 4. Press Enter
-	_, err = Run(serial, "shell", "input", "keyevent", "66") // KEYCODE_ENTER
 	return err
 }
 
@@ -158,4 +189,14 @@ func LockScreen(serial string) error {
 		_, err = Run(serial, "shell", "input", "keyevent", "26") // POWER
 	}
 	return err
+}
+
+// sanitize makes a serial safe to embed in a filename
+func sanitize(s string) string {
+	return strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			return r
+		}
+		return '_'
+	}, s)
 }

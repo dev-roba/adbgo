@@ -10,6 +10,8 @@ import (
 
 const SessionTimeout = 30 * time.Minute
 
+const MinPasswordLength = 8
+
 type Session struct {
 	Device     *config.Device
 	LoggedInAt time.Time
@@ -37,9 +39,26 @@ func CheckPassword(hash, password string) bool {
 	return err == nil
 }
 
+func ValidatePasswordStrength(password string) error {
+	if len(password) < MinPasswordLength {
+		return fmt.Errorf("password too short (min %d characters)", MinPasswordLength)
+	}
+	return nil
+}
+
+// Signup registers a device. If the serial is already registered, an error is
+// returned so an existing registration can never be replaced by accident.
 func Signup(cfg *config.Config, serial, name, password string) (*Session, error) {
 	if name == "" {
 		name = serial
+	}
+
+	if err := ValidatePasswordStrength(password); err != nil {
+		return nil, err
+	}
+
+	if cfg.FindBySerial(serial) != nil {
+		return nil, fmt.Errorf("device %s is already registered — remove it first from Device Management if you want to re-register it", serial)
 	}
 
 	hash, err := HashPassword(password)
@@ -60,7 +79,7 @@ func Signup(cfg *config.Config, serial, name, password string) (*Session, error)
 	}
 
 	return &Session{
-		Device:     &dev,
+		Device:     cfg.FindBySerial(serial),
 		LoggedInAt: time.Now(),
 		GodMode:    false,
 	}, nil
