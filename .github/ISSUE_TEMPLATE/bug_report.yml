@@ -1,0 +1,48 @@
+name: Bug report
+description: Report a reproducible adbgo problem
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: "Do not include passwords, personal logs, account details, or private device identifiers."
+  - type: input
+    id: version
+    attributes:
+      label: adbgo version or commit
+      placeholder: "v0.1.0 or commit SHA"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "Arch Linux, Windows 11, macOS"
+    validations:
+      required: true
+  - type: input
+    id: android
+    attributes:
+      label: Android and ADB versions
+      placeholder: "Android 15; platform-tools 36.x"
+    validations:
+      required: false
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include sanitized commands and exact steps.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
