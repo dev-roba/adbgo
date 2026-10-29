@@ -24,6 +24,7 @@ Built on Linux (Arch/Omarchy first-class) with Go + [huh](https://github.com/cha
 - Nuclear options: factory reset, bootloader unlock/lock (waits for fastboot),
   remove screen lock, FRP attempts, raw adb/fastboot
 - Every dangerous action requires typing `YES` (and the serial for the worst ones)
+- **Self-update** — "Check for Updates" in the main menu downloads the latest GitHub release and swaps the binary in place
 
 ## Requirements
 
@@ -85,6 +86,8 @@ go vet ./...    # static checks (CI runs gofmt + vet + build + test)
 
 Releases are cut with GoReleaser — push a `v*` tag and GitHub Actions
 publishes binaries for Linux, macOS and Windows (amd64 + arm64).
+In-app: **Main Menu → Check for Updates** downloads the latest release for
+your OS/arch and replaces the running binary (restart adbgo after).
 
 ## Warning
 

@@ -14,9 +14,14 @@ import (
 	"adbgo/internal/config"
 	"adbgo/internal/danger"
 	"adbgo/internal/ui"
+	"adbgo/internal/update"
 
 	"github.com/charmbracelet/huh"
 )
+
+// version is injected at build time by GoReleaser (-X main.version=...);
+// "dev" means it was built from source without version info.
+var version = "dev"
 
 func main() {
 	// Check adb is available
@@ -264,6 +269,7 @@ func showMainMenu(cfg *config.Config, session *auth.Session) {
 
 		options = append(options,
 			huh.NewOption("Logout", "logout"),
+			huh.NewOption("Check for Updates", "update"),
 			huh.NewOption("Exit", "exit"),
 		)
 
@@ -317,11 +323,61 @@ func showMainMenu(cfg *config.Config, session *auth.Session) {
 		case "logout":
 			return
 
+		case "update":
+			checkForUpdates()
+
 		case "exit":
 			ui.PrintSuccess("Goodbye.")
 			os.Exit(0)
 		}
 	}
+}
+
+// checkForUpdates compares the running version with the latest GitHub
+// release and offers a one-shot self-update.
+func checkForUpdates() {
+	fmt.Println()
+	ui.PrintInfo("Current version: " + version)
+	ui.PrintInfo("Checking GitHub for updates...")
+
+	latest, err := update.Latest()
+	if err != nil {
+		ui.PrintError("Could not check for updates: " + err.Error())
+		ui.PrintWarning("Are you online? You can also update manually: go install github.com/dev-roba/adbgo@latest")
+		ui.Pause()
+		return
+	}
+	ui.PrintInfo("Latest release:  " + latest)
+
+	if version != "dev" && !update.IsNewer(latest, version) {
+		ui.PrintSuccess("adbgo is up to date.")
+		ui.Pause()
+		return
+	}
+	if version == "dev" {
+		ui.PrintWarning("You are running a dev build (no version info) — updating is safe but may not be newer.")
+	}
+
+	var install bool
+	form := huh.NewForm(huh.NewGroup(
+		huh.NewConfirm().
+			Title(fmt.Sprintf("Download and install %s?", latest)).
+			Value(&install),
+	))
+	if err := form.Run(); err != nil || !install {
+		return
+	}
+
+	ui.PrintInfo("Downloading and installing " + latest + "...")
+	if err := update.Install(latest); err != nil {
+		ui.PrintError("Update failed: " + err.Error())
+		ui.PrintInfo("Fallback: go install github.com/dev-roba/adbgo@latest")
+		ui.Pause()
+		return
+	}
+	ui.PrintSuccess("Updated to " + latest + "!")
+	ui.PrintWarning("Restart adbgo to run the new version.")
+	ui.Pause()
 }
 
 // enableGodMode requires the account password — "YES" alone is not enough
