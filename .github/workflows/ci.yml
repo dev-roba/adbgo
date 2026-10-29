@@ -15,6 +15,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - run: go mod tidy
       - run: gofmt -w $(git ls-files '*.go')
       - run: go vet ./...
       - run: go test ./...
