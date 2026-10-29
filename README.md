@@ -8,7 +8,7 @@
 
 - Password-based local login and registered-device profiles
 - Interactive device selection and registration management (rename/remove)
-- USB-to-Wi-Fi ADB connection helper for legacy TCP/IP debugging
+- Wireless ADB for both legacy USB-to-TCP/IP and modern Android Wireless Debugging pairing
 - Live Logcat with priority selection and real process-ID filtering for a running package
 - APK installation with a local file chooser when `zenity` or `kdialog` is installed
 - Interactively browse `/sdcard` directories and push/pull selected files or folders
@@ -54,7 +54,7 @@ For older Android versions or devices that support legacy TCP/IP mode:
 3. Choose **Wireless ADB**, select the USB-connected device, and enter the phone's IP address and port.
 4. Verify the device appears in `adb devices` before disconnecting USB.
 
-The legacy `adb tcpip 5555` workflow is not supported by every Android build. On Android 11+, prefer **Developer options → Wireless debugging**, use Android's pairing flow, and connect using the IP address and port shown by the phone. Do not expose ADB ports to public or untrusted networks.
+The legacy `adb tcpip 5555` workflow is not supported by every Android build. On Android 11+, choose the modern pairing flow in adbgo, then enter the pairing endpoint and six-digit code from **Developer options → Wireless debugging → Pair device with pairing code**, followed by the connection endpoint shown on the main Wireless debugging screen. Do not expose ADB ports to public or untrusted networks.
 
 ## Releases
 
