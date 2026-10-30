@@ -816,6 +816,7 @@ func showAppManagement(session *auth.Session) {
 				Options(
 					huh.NewOption("Install APK or Split Bundle (.apk, .xapk, .apks)", "install"),
 					huh.NewOption("Extract / Backup APK to PC", "extract"),
+					huh.NewOption("📷 Extract Photos (copy or cut from phone)", "photos"),
 					huh.NewOption("Launch App (search by keyword)", "launch"),
 					huh.NewOption("Force-Stop App", "force_stop"),
 					huh.NewOption("Clear App Data", "clear"),
@@ -846,6 +847,9 @@ func showAppManagement(session *auth.Session) {
 				ui.PrintSuccess(fmt.Sprintf("Extracted %d file(s): %s", len(files), strings.Join(files, ", ")))
 			}
 		}
+
+	case "photos":
+		extractPhotosFlow(serial)
 
 	case "launch":
 		launchAppFlow(serial)
@@ -1938,16 +1942,16 @@ func pentestSurfaceFlow(serial string) {
 				opts[i] = huh.NewOption(m, m)
 			}
 			var sel string
-			if err := huh.NewForm(huh.NewGroup(
-					huh.NewSelect[string]().
-						Title(fmt.Sprintf("%d apps match '%s' — pick one", len(matches), q)).
-						Options(opts...).
-						Value(&sel),
-				)).Run(); err != nil || sel == "" {
-					return
+			selForm := huh.NewForm(huh.NewGroup(
+				huh.NewSelect[string]().
+					Title(fmt.Sprintf("%d apps match '%s' — pick one", len(matches), q)).
+					Options(opts...).
+					Value(&sel),
+			))
+			if err := selForm.Run(); err != nil || sel == "" {
+				return
 			}
-				pkg = sel
-			}
+			pkg = sel
 		}
 	}
 
@@ -2034,4 +2038,88 @@ func saveJSONReport(prefix string, v any) {
 		return
 	}
 	ui.PrintSuccess("Report saved: " + path)
+}
+
+// extractPhotosFlow pulls camera photos, screenshots or all current media
+// from the phone into a local folder, optionally cutting (deleting) them
+// from the device after a successful transfer.
+func extractPhotosFlow(serial string) {
+	var cat string
+	cForm := huh.NewForm(huh.NewGroup(
+		huh.NewSelect[string]().
+			Title("Extract which photos?").
+			Options(
+				huh.NewOption("📷 Camera photos (/sdcard/DCIM/Camera)", "camera"),
+				huh.NewOption("🖼️ Screenshots (/sdcard/Pictures/Screenshots)", "screenshots"),
+				huh.NewOption("🎬 Screen recordings (/sdcard/Movies/ScreenRecords)", "screenrec"),
+				huh.NewOption("📚 All current photos (/sdcard/DCIM, recursive)", "all"),
+			).
+			Value(&cat),
+	))
+	if err := cForm.Run(); err != nil || cat == "" {
+		return
+	}
+
+	remote := "/sdcard/DCIM"
+	switch cat {
+	case "camera":
+		remote = "/sdcard/DCIM/Camera"
+	case "screenshots":
+		remote = "/sdcard/Pictures/Screenshots"
+	case "screenrec":
+		remote = "/sdcard/Movies/ScreenRecords"
+	}
+
+	var dest string
+	var mode string
+	dForm := huh.NewForm(huh.NewGroup(
+		huh.NewInput().
+			Title("Destination folder on PC").
+			Placeholder("adbgo-photos").
+			Value(&dest),
+		huh.NewSelect[string]().
+			Title("Copy or cut?").
+			Options(
+				huh.NewOption("Copy (keep photos on phone)", "copy"),
+				huh.NewOption("Cut (delete from phone after transfer)", "cut"),
+			).
+			Value(&mode),
+	))
+	if err := dForm.Run(); err != nil {
+		return
+	}
+	dest = strings.TrimSpace(dest)
+	if dest == "" {
+		dest = "adbgo-photos"
+	}
+	move := mode == "cut"
+
+	if move && !danger.ConfirmYES("CUT photos — files will be DELETED from the phone after transfer") {
+		ui.PrintError("Cancelled")
+		return
+	}
+
+	ui.PrintInfo("Finding media in " + remote + "...")
+	pulled, moved, failed, err := adb.PullPhotos(serial, remote, dest, move, func(done, total int, name string) {
+		fmt.Printf("\r  transferring %d/%d: %-45s", done, total, name)
+	})
+	fmt.Println()
+	if err != nil {
+		ui.PrintError(err.Error())
+		ui.Pause()
+		return
+	}
+	if pulled == 0 {
+		ui.PrintWarning("No media files found in " + remote + ".")
+		ui.Pause()
+		return
+	}
+	ui.PrintSuccess(fmt.Sprintf("Copied %d file(s) to %s", pulled, dest))
+	if move {
+		ui.PrintSuccess(fmt.Sprintf("Deleted %d file(s) from the phone (cut)", moved))
+	}
+	if failed > 0 {
+		ui.PrintWarning(fmt.Sprintf("%d file(s) had problems — anything not fully transferred was NOT deleted from the phone.", failed))
+	}
+	ui.Pause()
 }
