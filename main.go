@@ -2128,7 +2128,7 @@ func extractPhotosFlow(serial string) {
 		pickForm := huh.NewForm(huh.NewGroup(
 			huh.NewMultiSelect[string]().
 				Title("Scroll with ↑/↓, space to select, / to filter, enter to confirm").
-				Filterable().
+				Filterable(true).
 				Options(opts...).
 				Value(&chosen),
 		))
