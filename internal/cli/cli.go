@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -30,6 +31,7 @@ func PrintHelp() {
 	fmt.Println("  shell [-s serial]           Open interactive adb shell")
 	fmt.Println("  dashboard [-s serial]       Display live battery, storage, and display status")
 	fmt.Println("  info [-s serial]            Display hardware & system properties")
+	fmt.Println("  fingerprint [-s serial]      Security fingerprint & risk verdict")
 	fmt.Println("  bruteforce [flags]           Lockscreen credential tester (pin/password/pattern)")
 	fmt.Println("      -type pin|password|pattern -min N -max N -mask 08?? -wordlist file")
 	fmt.Println("      -delay 500 -jitter 150 -max-attempts N -resume")
@@ -189,6 +191,89 @@ func HandleCLI(version string) bool {
 				strings.Contains(line, "ro.build.version.sdk") ||
 				strings.Contains(line, "ro.product.cpu.abi") {
 				fmt.Println(line)
+			}
+		}
+		return true
+
+	case "fingerprint":
+		fs := flag.NewFlagSet("fingerprint", flag.ExitOnError)
+		serial := fs.String("s", "", "Device serial")
+		jsonOut := fs.String("json", "", "Save fingerprint as JSON to this path")
+		fs.Parse(args)
+		target := getOrPickDevice(*serial)
+		ui.PrintInfo("Profiling " + target + "...")
+		fp, err := adb.CollectFingerprint(target)
+		if err != nil {
+			ui.PrintError(err.Error())
+			os.Exit(1)
+		}
+		fmt.Println(fp.Report())
+		fmt.Println("Verdict: " + fp.RiskVerdict())
+		if *jsonOut != "" {
+			if data, merr := json.MarshalIndent(fp, "", "  "); merr == nil {
+				if werr := os.WriteFile(*jsonOut, data, 0o600); werr != nil {
+					ui.PrintError("Could not save JSON: " + werr.Error())
+				} else {
+					ui.PrintSuccess("Saved: " + *jsonOut)
+				}
+			}
+		}
+		return true
+
+	case "surface":
+		fs := flag.NewFlagSet("surface", flag.ExitOnError)
+		serial := fs.String("s", "", "Device serial")
+		pkg := fs.String("pkg", "", "Package name to inspect")
+		all := fs.Bool("all", false, "Scan all user apps")
+		jsonOut := fs.String("json", "", "Save results as JSON to this path")
+		fs.Parse(args)
+		target := getOrPickDevice(*serial)
+		if *all {
+			ui.PrintInfo("Scanning all user apps on " + target + "...")
+			surfaces, err := adb.ScanAllSurfaces(target, func(done, total int, pkg string) {
+				fmt.Printf("\r  scanning %d/%d: %-45s", done+1, total, pkg)
+			})
+			fmt.Println()
+			if err != nil {
+				ui.PrintError(err.Error())
+				os.Exit(1)
+			}
+			withIssues := 0
+			for _, s := range surfaces {
+				if len(s.Issues()) > 0 {
+					withIssues++
+					fmt.Println(s.Report())
+				}
+			}
+			ui.PrintInfo(fmt.Sprintf("%d apps scanned, %d with findings", len(surfaces), withIssues))
+			if *jsonOut != "" {
+				if data, merr := json.MarshalIndent(surfaces, "", "  "); merr == nil {
+					if werr := os.WriteFile(*jsonOut, data, 0o600); werr != nil {
+						ui.PrintError("Could not save JSON: " + werr.Error())
+					} else {
+						ui.PrintSuccess("Saved: " + *jsonOut)
+					}
+				}
+			}
+			return true
+		}
+		if *pkg == "" {
+			ui.PrintError("Provide -pkg com.example.app or -all")
+			os.Exit(1)
+		}
+		s, err := adb.ScanAppSurface(target, *pkg)
+		if err != nil {
+			ui.PrintError(err.Error())
+			os.Exit(1)
+		}
+		fmt.Println(s.Report())
+		if *jsonOut != "" {
+			if data, merr := json.MarshalIndent(s, "", "  "); merr == nil {
+				if werr := os.WriteFile(*jsonOut, data, 0o600); werr != nil {
+					ui.PrintError("Could not save JSON: " + werr.Error())
+				} else {
+					ui.PrintSuccess("Saved: " + *jsonOut)
+				}
 			}
 		}
 		return true

@@ -271,6 +271,7 @@ func showMainMenu(cfg *config.Config, session *auth.Session) {
 			huh.NewOption("📦 App Management (install, extract, freeze)", "apps"),
 			huh.NewOption("📂 File & System (files, photo sync, logcat)", "files"),
 			huh.NewOption("👥 Multi-Device Mode", "multi"),
+			huh.NewOption("🛡️ Pentest Lab (fingerprint & attack surface)", "pentest"),
 		}
 
 		if session.GodMode {
@@ -336,6 +337,9 @@ func showMainMenu(cfg *config.Config, session *auth.Session) {
 
 		case "multi":
 			showMultiDevice(session)
+
+		case "pentest":
+			showPentestLab(session)
 
 		case "god":
 			enableGodMode(session)
@@ -1858,4 +1862,176 @@ func bruteforceFlow(serial string) {
 		ui.PrintSuccess("CREDENTIAL FOUND: " + found)
 	}
 	ui.Pause()
+}
+
+// showPentestLab is the recon entry point of the Pentest Lab: device
+// fingerprinting and app attack-surface analysis, for authorized testing.
+func showPentestLab(session *auth.Session) {
+	serial := session.Device.Serial
+	for {
+		var choice string
+		form := huh.NewForm(huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("🛡️ Pentest Lab — " + session.Device.Name).
+				Options(
+					huh.NewOption("🎯 Device Fingerprint (security posture & verdict)", "fingerprint"),
+					huh.NewOption("💥 Attack-Surface Dump (single app)", "surface"),
+					huh.NewOption("💥 Attack-Surface Scan (all user apps, ranked)", "scan_all"),
+					huh.NewOption("Back", "back"),
+				).
+				Value(&choice),
+		))
+		if err := form.Run(); err != nil || choice == "back" || choice == "" {
+			return
+		}
+
+		switch choice {
+		case "fingerprint":
+			pentestFingerprintFlow(serial)
+		case "surface":
+			pentestSurfaceFlow(serial)
+		case "scan_all":
+			pentestScanAllFlow(serial)
+		}
+	}
+}
+
+// pentestFingerprintFlow profiles the device and shows a posture verdict.
+func pentestFingerprintFlow(serial string) {
+	ui.ClearScreen()
+	fmt.Println(ui.TitleStyle.Render("🎯 Device Fingerprint"))
+	fmt.Println()
+	ui.PrintInfo("Profiling device (read-only queries)...")
+	fp, err := adb.CollectFingerprint(serial)
+	if err != nil {
+		ui.PrintError(err.Error())
+		ui.Pause()
+		return
+	}
+	fmt.Println(fp.Report())
+	fmt.Println(ui.Highlight.Render("Verdict: ") + fp.RiskVerdict())
+	fmt.Println()
+
+	var save bool
+	if err := huh.NewForm(huh.NewGroup(
+		huh.NewConfirm().Title("Save fingerprint as JSON report?").Value(&save),
+	)).Run(); err == nil && save {
+		saveJSONReport("adbgo-fingerprint", fp)
+	}
+	ui.Pause()
+}
+
+// pentestSurfaceFlow dumps the attack surface of one app.
+func pentestSurfaceFlow(serial string) {
+	fmt.Print("Enter package name (or keyword, e.g. whatsapp): ")
+	q := ui.ReadLine()
+	if q == "" {
+		return
+	}
+	pkg := q
+	if matches, err := adb.FindPackagesByKeyword(serial, q); err == nil {
+		if len(matches) == 1 {
+			pkg = matches[0]
+		} else if len(matches) > 1 {
+			opts := make([]huh.Option[string], len(matches))
+			for i, m := range matches {
+				opts[i] = huh.NewOption(m, m)
+			}
+			var sel string
+			if err := huh.NewForm(huh.NewGroup(
+					huh.NewSelect[string]().
+						Title(fmt.Sprintf("%d apps match '%s' — pick one", len(matches), q)).
+						Options(opts...).
+						Value(&sel),
+				)).Run(); err != nil || sel == "" {
+					return
+			}
+				pkg = sel
+			}
+		}
+	}
+
+	ui.PrintInfo("Dumping package attack surface for " + pkg + "...")
+	s, err := adb.ScanAppSurface(serial, pkg)
+	if err != nil {
+		ui.PrintError(err.Error())
+		ui.Pause()
+		return
+	}
+	fmt.Println()
+	fmt.Println(s.Report())
+	fmt.Println(ui.DimStyle.Render("Dangerous permissions: " + strings.Join(s.DangerousPermissions, ", ")))
+	fmt.Println()
+
+	var save bool
+	if err := huh.NewForm(huh.NewGroup(
+		huh.NewConfirm().Title("Save as JSON report?").Value(&save),
+	)).Run(); err == nil && save {
+		saveJSONReport("adbgo-surface", s)
+	}
+	ui.Pause()
+}
+
+// pentestScanAllFlow scans every user app and ranks them by findings.
+func pentestScanAllFlow(serial string) {
+	ui.ClearScreen()
+	ui.PrintInfo("Scanning all user apps (this may take a while)...")
+	surfaces, err := adb.ScanAllSurfaces(serial, func(done, total int, pkg string) {
+		fmt.Printf("\r  scanning %d/%d: %-45s", done+1, total, pkg)
+	})
+	fmt.Println("\n")
+	if err != nil {
+		ui.PrintError(err.Error())
+		ui.Pause()
+		return
+	}
+	if len(surfaces) == 0 {
+		ui.PrintWarning("No user apps found.")
+		ui.Pause()
+		return
+	}
+
+	withIssues := 0
+	for _, s := range surfaces {
+		if len(s.Issues()) > 0 {
+			withIssues++
+		}
+	}
+	fmt.Println(ui.TitleStyle.Render(fmt.Sprintf("💥 Attack-Surface Scan — %d apps scanned, %d with findings", len(surfaces), withIssues)))
+	fmt.Println()
+	shown := 0
+	for _, s := range surfaces {
+		if len(s.Issues()) == 0 {
+			continue
+		}
+		if shown >= 15 {
+			fmt.Printf("  ... and %d more apps with findings — see the JSON report\n", withIssues-shown)
+			break
+		}
+		fmt.Println(s.Report())
+		shown++
+	}
+
+	var save bool
+	if err := huh.NewForm(huh.NewGroup(
+		huh.NewConfirm().Title("Save full results as JSON report?").Value(&save),
+	)).Run(); err == nil && save {
+		saveJSONReport("adbgo-surface-scan", surfaces)
+	}
+	ui.Pause()
+}
+
+// saveJSONReport marshals v to a timestamped JSON file in the CWD.
+func saveJSONReport(prefix string, v any) {
+	path := prefix + "-" + time.Now().Format("20060102-150405") + ".json"
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		ui.PrintError("Could not marshal report: " + err.Error())
+		return
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		ui.PrintError("Could not save report: " + err.Error())
+		return
+	}
+	ui.PrintSuccess("Report saved: " + path)
 }

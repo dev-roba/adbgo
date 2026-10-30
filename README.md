@@ -152,7 +152,23 @@ Use **Auth Menu $\to$ Export Devices** to backup or transfer registrations betwe
 
 ## 🔐 Pentest Lab
 
-adbgo ships a throttle-aware **lockscreen credential tester** for authorized security testing — your own device, or one you have written permission to test:
+adbgo ships recon & security-testing features for **authorized use only** — your own device, or one you have written permission to test. In the TUI: Main Menu → 🛡️ Pentest Lab.
+
+**Device fingerprint** — security posture profile (build, patch age, SELinux, verified boot, encryption, root indicators) with an attack-surface verdict:
+
+```bash
+adbgo fingerprint [-s serial] [-json profile.json]
+```
+
+**Attack-surface dump** — flags risky exported components (activities / services / receivers / providers), `debuggable` & `allowBackup` flags, and dangerous permissions per app:
+
+```bash
+adbgo surface -pkg com.example.app      # single app
+adbgo surface -all                       # all user apps, ranked by findings
+adbgo surface -all -json report.json    # save as JSON
+```
+
+**Lockscreen credential tester** — throttle-aware PIN/password/pattern testing:
 
 ```bash
 # TUI: Main Menu → ⚠ DANGER ZONE → 🔓 Lockscreen Credential Tester (GOD MODE)
@@ -170,7 +186,7 @@ adbgo bruteforce -type pin -resume                       # continue a saved sess
 - **Pattern**: valid-only generation respecting Android's 3×3 skip rules (320 → 389k candidates by length)
 - **Throttle-aware**: exponential backoff (30s → 15 min cap), configurable delay + jitter, hard attempt cap
 - **Resumable**: every tried candidate is saved to `~/.config/adbgo/bruteforce/`; Ctrl+C saves and `-resume` continues
-- **Guardrails**: authorization confirmation, factory-reset wipe warning, requires GOD MODE in the TUI
+- **Guardrails**: authorization confirmation, factory-reset wipe warning, GOD MODE gating in the TUI
 
 ## Development & Testing
 
