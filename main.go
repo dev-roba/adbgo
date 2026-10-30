@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -2040,15 +2041,17 @@ func saveJSONReport(prefix string, v any) {
 	ui.PrintSuccess("Report saved: " + path)
 }
 
-// extractPhotosFlow pulls camera photos, screenshots or all current media
-// from the phone into a local folder, optionally cutting (deleting) them
-// from the device after a successful transfer.
+// extractPhotosFlow pulls camera photos, screenshots, screen recordings,
+// recent photos or all media from the phone into a local folder — either
+// everything at once or a hand-picked selection, optionally cutting
+// (deleting) them from the device after a successful transfer.
 func extractPhotosFlow(serial string) {
 	var cat string
 	cForm := huh.NewForm(huh.NewGroup(
 		huh.NewSelect[string]().
 			Title("Extract which photos?").
 			Options(
+				huh.NewOption("🕒 Recent photos (latest 30, newest first)", "recent"),
 				huh.NewOption("📷 Camera photos (/sdcard/DCIM/Camera)", "camera"),
 				huh.NewOption("🖼️ Screenshots (/sdcard/Pictures/Screenshots)", "screenshots"),
 				huh.NewOption("🎬 Screen recordings (/sdcard/Movies/ScreenRecords)", "screenrec"),
@@ -2060,14 +2063,114 @@ func extractPhotosFlow(serial string) {
 		return
 	}
 
-	remote := "/sdcard/DCIM"
+	remoteRoot := "/sdcard"
+	var dirs []string
 	switch cat {
 	case "camera":
-		remote = "/sdcard/DCIM/Camera"
+		remoteRoot = "/sdcard/DCIM/Camera"
+		dirs = []string{remoteRoot}
 	case "screenshots":
-		remote = "/sdcard/Pictures/Screenshots"
+		remoteRoot = "/sdcard/Pictures/Screenshots"
+		dirs = []string{remoteRoot}
 	case "screenrec":
-		remote = "/sdcard/Movies/ScreenRecords"
+		remoteRoot = "/sdcard/Movies/ScreenRecords"
+		dirs = []string{remoteRoot}
+	case "all":
+		remoteRoot = "/sdcard/DCIM"
+		dirs = []string{remoteRoot}
+	default: // recent: newest across the usual media locations
+		dirs = []string{"/sdcard/DCIM/Camera", "/sdcard/Pictures/Screenshots", "/sdcard/Movies/ScreenRecords", "/sdcard/Pictures"}
+	}
+
+	ui.PrintInfo("Finding media on the phone...")
+	var infos []adb.MediaInfo
+	if cat == "recent" {
+		infos = adb.RecentMedia(serial, dirs, 30)
+	} else {
+		var err error
+		infos, err = adb.ListRemoteMediaInfo(serial, dirs[0])
+		if err != nil {
+			ui.PrintError(err.Error())
+			ui.Pause()
+			return
+		}
+	}
+	if len(infos) == 0 {
+		ui.PrintWarning("No media files found on the phone.")
+		ui.Pause()
+		return
+	}
+	ui.PrintSuccess(fmt.Sprintf("Found %d media file(s).", len(infos)))
+
+	// All files or pick interactively?
+	var pick string
+	pForm := huh.NewForm(huh.NewGroup(
+		huh.NewSelect[string]().
+			Title("Which files do you want?").
+			Options(
+				huh.NewOption(fmt.Sprintf("All %d file(s)", len(infos)), "all"),
+				huh.NewOption("👀 Pick files (scrollable list, select the ones you want)", "pick"),
+			).
+			Value(&pick),
+	))
+	if err := pForm.Run(); err != nil {
+		return
+	}
+
+	transfer := infos
+	if pick == "pick" {
+		opts := make([]huh.Option[string], len(infos))
+		for i, f := range infos {
+			label := fmt.Sprintf("%s — %s — %s", f.Name, adb.HumanSize(f.Size), time.Unix(f.Mtime, 0).Format("2006-01-02 15:04"))
+			opts[i] = huh.NewOption(label, f.Path)
+		}
+		var chosen []string
+		pickForm := huh.NewForm(huh.NewGroup(
+			huh.NewMultiSelect[string]().
+				Title("Scroll with ↑/↓, space to select, / to filter, enter to confirm").
+				Filterable().
+				Options(opts...).
+				Value(&chosen),
+		))
+		if err := pickForm.Run(); err != nil {
+			return
+		}
+		chosenSet := make(map[string]bool, len(chosen))
+		for _, c := range chosen {
+			chosenSet[c] = true
+		}
+		transfer = transfer[:0]
+		for _, f := range infos {
+			if chosenSet[f.Path] {
+				transfer = append(transfer, f)
+			}
+		}
+		if len(transfer) == 0 {
+			ui.PrintWarning("Nothing selected.")
+			return
+		}
+	}
+	ui.PrintInfo(fmt.Sprintf("%d file(s) selected.", len(transfer)))
+
+	// Optional preview in the system image viewer before transferring.
+	var preview bool
+	pvForm := huh.NewForm(huh.NewGroup(
+		huh.NewConfirm().
+			Title("Preview selected file(s) in your image viewer first?").
+			Value(&preview),
+	))
+	if err := pvForm.Run(); err != nil {
+		return
+	}
+	if preview {
+		openMediaPreview(serial, transfer)
+		var proceed bool
+		if err := huh.NewForm(huh.NewGroup(
+			huh.NewConfirm().Title(fmt.Sprintf("Continue transferring %d file(s)?", len(transfer))).Value(&proceed),
+		)).Run(); err != nil || !proceed {
+			ui.PrintError("Cancelled")
+			return
+		}
 	}
 
 	var dest string
@@ -2094,13 +2197,12 @@ func extractPhotosFlow(serial string) {
 	}
 	move := mode == "cut"
 
-	if move && !danger.ConfirmYES("CUT photos — files will be DELETED from the phone after transfer") {
+	if move && !danger.ConfirmYES(fmt.Sprintf("CUT %d file(s) — they will be DELETED from the phone after transfer", len(transfer))) {
 		ui.PrintError("Cancelled")
 		return
 	}
 
-	ui.PrintInfo("Finding media in " + remote + "...")
-	pulled, moved, failed, err := adb.PullPhotos(serial, remote, dest, move, func(done, total int, name string) {
+	pulled, moved, failed, err := adb.PullFiles(serial, transfer, remoteRoot, dest, move, func(done, total int, name string) {
 		fmt.Printf("\r  transferring %d/%d: %-45s", done, total, name)
 	})
 	fmt.Println()
@@ -2110,7 +2212,7 @@ func extractPhotosFlow(serial string) {
 		return
 	}
 	if pulled == 0 {
-		ui.PrintWarning("No media files found in " + remote + ".")
+		ui.PrintWarning("Transfer failed — nothing was copied, and nothing was deleted from the phone.")
 		ui.Pause()
 		return
 	}
@@ -2121,5 +2223,43 @@ func extractPhotosFlow(serial string) {
 	if failed > 0 {
 		ui.PrintWarning(fmt.Sprintf("%d file(s) had problems — anything not fully transferred was NOT deleted from the phone.", failed))
 	}
+
+	var openFolder bool
+	if err := huh.NewForm(huh.NewGroup(
+		huh.NewConfirm().Title("Open destination folder?").Value(&openFolder),
+	)).Run(); err == nil && openFolder {
+		_ = exec.Command("xdg-open", dest).Start()
+	}
 	ui.Pause()
+}
+
+// openMediaPreview pulls up to 12 selected media files into a temp
+// folder and opens them with the system image viewer (xdg-open), so
+// they can be inspected before transferring.
+func openMediaPreview(serial string, files []adb.MediaInfo) {
+	if len(files) > 12 {
+		ui.PrintWarning(fmt.Sprintf("Opening only the first 12 of %d selected file(s).", len(files)))
+		files = files[:12]
+	}
+	dir := filepath.Join(os.TempDir(), "adbgo-preview")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		ui.PrintError("Could not create preview folder: " + err.Error())
+		return
+	}
+	opened := 0
+	for _, f := range files {
+		local := filepath.Join(dir, f.Name)
+		if _, err := adb.Run(serial, "pull", f.Path, local); err != nil {
+			ui.PrintWarning("Could not pull " + f.Name + ": " + err.Error())
+			continue
+		}
+		if err := exec.Command("xdg-open", local).Start(); err != nil {
+			ui.PrintWarning("Could not open " + f.Name + ": " + err.Error())
+			continue
+		}
+		opened++
+	}
+	if opened > 0 {
+		ui.PrintInfo(fmt.Sprintf("Opened %d preview(s) in your image viewer — close them when done.", opened))
+	}
 }
