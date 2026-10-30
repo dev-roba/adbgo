@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -31,6 +32,9 @@ func PrintHelp() {
 	fmt.Println("  shell [-s serial]           Open interactive adb shell")
 	fmt.Println("  dashboard [-s serial]       Display live battery, storage, and display status")
 	fmt.Println("  info [-s serial]            Display hardware & system properties")
+	fmt.Println("  photos recent [-n N] [-json]   List newest photos (date, size, path)")
+	fmt.Println("  photos pull [-dir DIR] [-dest F] [-move -yes] Copy or cut media")
+	fmt.Println("  apps [-json]                   List installed third-party packages")
 	fmt.Println("  fingerprint [-s serial]      Security fingerprint & risk verdict")
 	fmt.Println("  bruteforce [flags]           Lockscreen credential tester (pin/password/pattern)")
 	fmt.Println("      -type pin|password|pattern -min N -max N -mask 08?? -wordlist file")
@@ -276,6 +280,136 @@ func HandleCLI(version string) bool {
 				}
 			}
 		}
+		return true
+
+	case "photos":
+		if len(args) == 0 {
+			fmt.Println("Usage:")
+			fmt.Println("  adbgo photos recent [-s serial] [-n N] [-json]      List the N newest photos")
+			fmt.Println("  adbgo photos pull [-s serial] [-dir DIR] [-dest F] [-move] [-yes]")
+			return true
+		}
+		switch args[0] {
+		case "recent":
+			fs := flag.NewFlagSet("photos recent", flag.ExitOnError)
+			serial := fs.String("s", "", "Device serial")
+			n := fs.Int("n", 30, "How many recent files to list")
+			jsonOut := fs.Bool("json", false, "Print as JSON")
+			fs.Parse(args[1:])
+			target := getOrPickDevice(*serial)
+			ui.PrintInfo("Finding recent media on " + target + "...")
+			infos := adb.RecentMedia(target, []string{"/sdcard/DCIM/Camera", "/sdcard/Pictures/Screenshots", "/sdcard/Movies/ScreenRecords", "/sdcard/Pictures"}, *n)
+			if len(infos) == 0 {
+				ui.PrintWarning("No media files found.")
+				return true
+			}
+			if *jsonOut {
+				data, merr := json.MarshalIndent(infos, "", "  ")
+				if merr != nil {
+					ui.PrintError(merr.Error())
+					os.Exit(1)
+				}
+				fmt.Println(string(data))
+				return true
+			}
+			fmt.Printf("%-40s %-9s %-17s %s\n", "NAME", "SIZE", "MODIFIED", "PATH")
+			fmt.Println(strings.Repeat("─", 100))
+			for _, f := range infos {
+				fmt.Printf("%-40s %-9s %-17s %s\n", f.Name, adb.HumanSize(f.Size), time.Unix(f.Mtime, 0).Format("2006-01-02 15:04"), f.Path)
+			}
+			ui.PrintInfo(fmt.Sprintf("%d file(s). Pull with: adbgo photos pull -dir /sdcard/DCIM/Camera", len(infos)))
+
+		case "pull":
+			fs := flag.NewFlagSet("photos pull", flag.ExitOnError)
+			serial := fs.String("s", "", "Device serial")
+			dir := fs.String("dir", "/sdcard/DCIM/Camera", "Remote directory to pull from")
+			dest := fs.String("dest", "adbgo-photos", "Destination folder on PC")
+			recentN := fs.Int("recent", 0, "Only the N newest files (0 = all)")
+			move := fs.Bool("move", false, "Cut: delete from phone after transfer")
+			yes := fs.Bool("yes", false, "Required with -move to skip the safety prompt")
+			fs.Parse(args[1:])
+			target := getOrPickDevice(*serial)
+			if *move && !*yes {
+				ui.PrintError("Cut mode deletes photos from the phone. Re-run with -move -yes to confirm you accept this.")
+				os.Exit(1)
+			}
+			ui.PrintInfo("Finding media in " + *dir + "...")
+			infos, err := adb.ListRemoteMediaInfo(target, *dir)
+			if err != nil {
+				ui.PrintError(err.Error())
+				os.Exit(1)
+			}
+			if *recentN > 0 && len(infos) > *recentN {
+				sorted := make([]adb.MediaInfo, len(infos))
+				copy(sorted, infos)
+				sort.Slice(sorted, func(i, j int) bool { return sorted[i].Mtime > sorted[j].Mtime })
+				infos = sorted[:*recentN]
+			}
+			if len(infos) == 0 {
+				ui.PrintWarning("No media files found in " + *dir)
+				return true
+			}
+			ui.PrintInfo(fmt.Sprintf("Transferring %d file(s) to %s...", len(infos), *dest))
+			pulled, moved, failed, err := adb.PullFiles(target, infos, *dir, *dest, *move, func(done, total int, name string) {
+				fmt.Printf("\r  transferring %d/%d: %-45s", done, total, name)
+			})
+			fmt.Println()
+			if err != nil {
+				ui.PrintError(err.Error())
+				os.Exit(1)
+			}
+			ui.PrintSuccess(fmt.Sprintf("Copied %d file(s) to %s", pulled, *dest))
+			if *move {
+				ui.PrintSuccess(fmt.Sprintf("Deleted %d file(s) from the phone (cut)", moved))
+			}
+			if failed > 0 {
+				ui.PrintWarning(fmt.Sprintf("%d file(s) had problems — anything not fully transferred was NOT deleted from the phone.", failed))
+			}
+
+		default:
+			ui.PrintError("Unknown photos subcommand: " + args[0])
+			fmt.Println("Try: adbgo photos recent | adbgo photos pull")
+			os.Exit(1)
+		}
+		return true
+
+	case "apps":
+		fs := flag.NewFlagSet("apps", flag.ExitOnError)
+		serial := fs.String("s", "", "Device serial")
+		all := fs.Bool("a", false, "Include system packages too")
+		jsonOut := fs.Bool("json", false, "Print as JSON")
+		fs.Parse(args)
+		target := getOrPickDevice(*serial)
+		shellArgs := []string{"shell", "pm", "list", "packages", "-3"}
+		if *all {
+			shellArgs = []string{"shell", "pm", "list", "packages"}
+		}
+		out, err := adb.Run(target, shellArgs...)
+		if err != nil {
+			ui.PrintError(err.Error())
+			os.Exit(1)
+		}
+		var pkgs []string
+		for _, line := range strings.Split(out, "\n") {
+			p := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "package:"))
+			if p != "" {
+				pkgs = append(pkgs, p)
+			}
+		}
+		sort.Strings(pkgs)
+		if *jsonOut {
+			data, merr := json.MarshalIndent(pkgs, "", "  ")
+			if merr != nil {
+				ui.PrintError(merr.Error())
+				os.Exit(1)
+			}
+			fmt.Println(string(data))
+			return true
+		}
+		for _, p := range pkgs {
+			fmt.Println(p)
+		}
+		ui.PrintInfo(fmt.Sprintf("%d package(s).", len(pkgs)))
 		return true
 
 	case "bruteforce":
