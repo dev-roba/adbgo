@@ -11,6 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"github.com/dev-roba/adbgo/internal/adb"
 	"github.com/dev-roba/adbgo/internal/auth"
 	"github.com/dev-roba/adbgo/internal/cli"
@@ -19,6 +23,7 @@ import (
 	"github.com/dev-roba/adbgo/internal/ui"
 	"github.com/dev-roba/adbgo/internal/update"
 
+	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 )
 
@@ -2110,6 +2115,7 @@ func extractPhotosFlow(serial string) {
 			Options(
 				huh.NewOption(fmt.Sprintf("All %d file(s)", len(infos)), "all"),
 				huh.NewOption("👀 Pick files (scrollable list, select the ones you want)", "pick"),
+				huh.NewOption("🖼 Gallery (browse thumbnails, select visually)", "gallery"),
 			).
 			Value(&pick),
 	))
@@ -2143,6 +2149,37 @@ func extractPhotosFlow(serial string) {
 		for _, f := range infos {
 			if chosenSet[f.Path] {
 				transfer = append(transfer, f)
+			}
+		}
+		if len(transfer) == 0 {
+			ui.PrintWarning("Nothing selected.")
+			return
+		}
+	}
+	if pick == "gallery" {
+		galleryFiles := infos
+		if len(galleryFiles) > 60 {
+			ui.PrintWarning("Gallery shows the newest 60 files — use 'Pick files' for the full list.")
+		}
+		if len(galleryFiles) > 60 {
+			galleryFiles = galleryFiles[:60]
+		}
+		items := prepareGalleryItems(serial, galleryFiles)
+		m := galleryModel{items: items, sel: map[int]bool{}}
+		outModel, err := tea.NewProgram(m).Run()
+		if err != nil {
+			ui.PrintError(err.Error())
+			return
+		}
+		gm, ok := outModel.(galleryModel)
+		if !ok || !gm.done {
+			ui.PrintWarning("Cancelled")
+			return
+		}
+		transfer = transfer[:0]
+		for i := range galleryFiles {
+			if gm.sel[i] {
+				transfer = append(transfer, galleryFiles[i])
 			}
 		}
 		if len(transfer) == 0 {
@@ -2262,4 +2299,219 @@ func openMediaPreview(serial string, files []adb.MediaInfo) {
 	if opened > 0 {
 		ui.PrintInfo(fmt.Sprintf("Opened %d preview(s) in your image viewer — close them when done.", opened))
 	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Thumbnail gallery (bubbletea): browse media as truecolor half-block
+// thumbnails, toggle selection visually, then confirm.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const (
+	galCols  = 4 // thumbnails per row
+	galRows  = 3 // rows per page (12 per page)
+	thumbW   = 24 // cells wide
+	thumbH   = 10 // cells tall (20 pixel rows)
+)
+
+type galleryItem struct {
+	info  adb.MediaInfo
+	local string // temp copy on PC used for the thumbnail / full preview
+	thumb string // pre-rendered ANSI thumbnail
+}
+
+type galleryModel struct {
+	items  []galleryItem
+	sel    map[int]bool
+	cursor int
+	done   bool
+}
+
+func (m galleryModel) Init() tea.Cmd { return nil }
+
+func (m galleryModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "q", "esc", "ctrl+c":
+			return m, tea.Quit
+		case "enter":
+			m.done = true
+			return m, tea.Quit
+		case "right", "l":
+			if m.cursor < len(m.items)-1 {
+				m.cursor++
+			}
+		case "left", "h":
+			if m.cursor > 0 {
+				m.cursor--
+			}
+		case "down", "j":
+			if m.cursor+galCols < len(m.items) {
+				m.cursor += galCols
+			}
+		case "up", "k":
+			if m.cursor-galCols >= 0 {
+				m.cursor -= galCols
+			}
+		case "pgdown":
+			if m.cursor+galCols*galRows < len(m.items) {
+				m.cursor += galCols * galRows
+			}
+		case "pgup":
+			if m.cursor-galCols*galRows >= 0 {
+				m.cursor -= galCols * galRows
+			}
+		case " ":
+			m.sel[m.cursor] = !m.sel[m.cursor]
+		case "a":
+			for i := range m.items {
+				m.sel[i] = true
+			}
+		case "n":
+			m.sel = map[int]bool{}
+		case "o":
+			if m.cursor < len(m.items) {
+				_ = exec.Command("xdg-open", m.items[m.cursor].local).Start()
+			}
+		}
+	}
+	return m, nil
+}
+
+func (m galleryModel) View() string {
+	if len(m.items) == 0 {
+		return "No media to display."
+	}
+	perPage := galCols * galRows
+	pageStart := (m.cursor / perPage) * perPage
+
+	selected := 0
+	for _, v := range m.sel {
+		if v {
+			selected++
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString(ui.TitleStyle.Render(fmt.Sprintf("🖼 adbgo gallery — %d/%d  selected: %d", m.cursor+1, len(m.items), selected)))
+	b.WriteString("\n")
+
+	for row := 0; row < galRows; row++ {
+		for line := 0; line < thumbH; line++ {
+			for col := 0; col < galCols; col++ {
+				idx := pageStart + row*galCols + col
+				if idx >= len(m.items) {
+					break
+				}
+				thumb := m.items[idx].thumb
+				lines := strings.Split(thumb, "\n")
+				if line < len(lines) {
+					b.WriteString(lines[line])
+				}
+				b.WriteString("  ")
+			}
+			b.WriteString("\n")
+		}
+		// captions under each thumbnail of this row
+		for col := 0; col < galCols; col++ {
+			idx := pageStart + row*galCols + col
+			if idx >= len(m.items) {
+				break
+			}
+			mark := " "
+			if m.sel[idx] {
+				mark = "✓"
+			}
+			cap := fmt.Sprintf("%s %2d %s", mark, idx+1, m.items[idx].info.Name)
+			if len(cap) > thumbW {
+				cap = cap[:thumbW-1] + "…"
+			}
+			if idx == m.cursor {
+				cap = "\x1b[7m" + cap + "\x1b[0m"
+			}
+			b.WriteString(cap)
+			b.WriteString("  ")
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(ui.DimStyle.Render("↑↓←→/hjkl move · space select · a all · n none · o open full size · pgup/pgdn page · enter confirm · q cancel"))
+	return b.String()
+}
+
+// prepareGalleryItems pulls each media file to a temp folder and renders
+// a small truecolor half-block thumbnail for it (videos and undecodable
+// formats get a placeholder).
+func prepareGalleryItems(serial string, files []adb.MediaInfo) []galleryItem {
+	dir := filepath.Join(os.TempDir(), "adbgo-gallery")
+	os.MkdirAll(dir, 0o755)
+	items := make([]galleryItem, 0, len(files))
+	for i, f := range files {
+		fmt.Printf("\r  thumbnail %d/%d: %-45s", i+1, len(files), f.Name)
+		local := filepath.Join(dir, fmt.Sprintf("%03d_%s", i, f.Name))
+		item := galleryItem{info: f, local: local}
+		if _, err := adb.Run(serial, "pull", f.Path, local); err == nil {
+			if img, err := loadImage(local); err == nil {
+				item.thumb = renderThumb(img, thumbW, thumbH)
+			}
+		}
+		if item.thumb == "" {
+			item.thumb = placeholderThumb(f)
+		}
+		items = append(items, item)
+	}
+	fmt.Println()
+	return items
+}
+
+// loadImage decodes a jpeg/png/gif file into an image.Image.
+func loadImage(path string) (image.Image, error) {
+	fh, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer fh.Close()
+	return image.Decode(fh)
+}
+
+// sampleColor nearest-neighbor samples the source image at (x,y) in a
+// pixel space of pw x ph.
+func sampleColor(img image.Image, x, y, pw, ph int) (int, int, int) {
+	b := img.Bounds()
+	sx := b.Min.X + x*b.Dx()/pw
+	sy := b.Min.Y + y*b.Dy()/ph
+	r, g, bl, _ := img.At(sx, sy).RGBA()
+	return int(r >> 8), int(g >> 8), int(bl >> 8)
+}
+
+// renderThumb draws an image as truecolor half-blocks: each terminal cell
+// holds two stacked pixels (▀ with fg = top pixel, bg = bottom pixel).
+func renderThumb(img image.Image, w, h int) string {
+	pw, ph := w*2, h*2
+	var b strings.Builder
+	for y := 0; y < ph; y += 2 {
+		for x := 0; x < pw; x++ {
+			tr, tg, tb := sampleColor(img, x, y, pw, ph)
+			br, bg, bb := sampleColor(img, x, y+1, pw, ph)
+			fmt.Fprintf(&b, "\x1b[38;2;%d;%d;%dm\x1b[48;2;%d;%d;%dm▀", tr, tg, tb, br, bg, bb)
+		}
+		b.WriteString("\x1b[0m\n")
+	}
+	return b.String()
+}
+
+// placeholderThumb is shown for videos and undecodable files.
+func placeholderThumb(f adb.MediaInfo) string {
+	var b strings.Builder
+	for y := 0; y < thumbH-1; y++ {
+		b.WriteString("\x1b[90m" + strings.Repeat("░", thumbW*2-2) + "  \x1b[0m\n")
+	}
+	label := "no preview"
+	pad := (thumbW*2 - 2 - len(label)) / 2
+	if pad < 0 {
+		pad = 0
+	}
+	b.WriteString("\x1b[90m" + strings.Repeat("░", pad) + " " + label + " " + strings.Repeat("░", pad) + "\x1b[0m\n")
+	return b.String()
 }
