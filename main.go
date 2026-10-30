@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1642,6 +1643,7 @@ func showDangerZone(session *auth.Session) {
 					huh.NewOption("Unlock Bootloader (fastboot)", "unlock"),
 					huh.NewOption("Lock Bootloader (fastboot)", "lock"),
 					huh.NewOption("Remove Screen Lock", "lockscreen"),
+					huh.NewOption("🔓 Lockscreen Credential Tester (PIN / password / pattern)", "bruteforce"),
 					huh.NewOption("Attempt Disable FRP", "frp"),
 					huh.NewOption("Format /data", "format_data"),
 					huh.NewOption("Raw adb command", "raw_adb"),
@@ -1669,6 +1671,8 @@ func showDangerZone(session *auth.Session) {
 		err = danger.LockBootloader(serial)
 	case "lockscreen":
 		err = danger.RemoveScreenLock(serial)
+	case "bruteforce":
+		bruteforceFlow(serial)
 	case "frp":
 		err = danger.DisableFRP(serial)
 	case "format_data":
@@ -1734,4 +1738,124 @@ func launchAppFlow(serial string) {
 			ui.PrintSuccess("Launched " + sel)
 		}
 	}
+}
+
+// bruteforceFlow guides an authorized lockscreen credential test:
+// PIN, password or pattern candidates are verified against the device via
+// the framework oracle, with throttle-aware backoff and resumable sessions.
+func bruteforceFlow(serial string) {
+	ui.ClearScreen()
+	fmt.Println(ui.TitleStyle.Render("🔓 Lockscreen Credential Tester"))
+	fmt.Println()
+	ui.PrintWarning("Authorized use only: run this on your own device, or one you have written permission to test.")
+	ui.PrintWarning("If 'Erase all data after 10 wrong attempts' is enabled, a failed run can FACTORY RESET the device.")
+	fmt.Println()
+	if !danger.ConfirmYES("run lockscreen credential testing on " + serial) {
+		ui.PrintError("Cancelled")
+		return
+	}
+
+	var typ string
+	tForm := huh.NewForm(huh.NewGroup(
+		huh.NewSelect[string]().
+			Title("Credential type").
+			Options(
+				huh.NewOption("PIN (numeric)", "pin"),
+				huh.NewOption("Password (wordlist / charset)", "password"),
+				huh.NewOption("Pattern (3x3 grid)", "pattern"),
+			).
+			Value(&typ),
+	))
+	if err := tForm.Run(); err != nil || typ == "" {
+		return
+	}
+
+	ui.PrintInfo("Checking device support (locksettings verify)...")
+	if !adb.CheckLockVerifySupport(serial) {
+		ui.PrintError("This device does not expose locksettings verify (Android 10+ required).")
+		ui.PrintInfo("The credential oracle is unavailable, so testing cannot proceed safely.")
+		ui.Pause()
+		return
+	}
+	ui.PrintSuccess("Credential oracle available: correct / incorrect / throttled are reported by the framework.")
+	fmt.Println()
+
+	cfg := adb.LockBruteConfig{
+		Type:        typ,
+		CommonFirst: true,
+		Delay:       500 * time.Millisecond,
+		Jitter:      150 * time.Millisecond,
+		MaxAttempts: 0,
+	}
+
+	minS, maxS, maskS, wordS, delayS, attS := "4", "4", "", "", "500", "0"
+	var resume bool
+
+	var fields []huh.Field
+	switch typ {
+	case "pin":
+		fields = append(fields,
+			huh.NewInput().Title("Min PIN length").Value(&minS),
+			huh.NewInput().Title("Max PIN length").Value(&maxS),
+			huh.NewInput().Title("Mask (optional: ? = unknown digit, e.g. 08??)").Value(&maskS),
+		)
+	case "password":
+		minS, maxS = "1", "6"
+		fields = append(fields,
+			huh.NewInput().Title("Wordlist file (blank = charset brute-force)").Value(&wordS),
+			huh.NewInput().Title("Min length").Value(&minS),
+			huh.NewInput().Title("Max length").Value(&maxS),
+			huh.NewInput().Title("Mask (optional: ? = any character)").Value(&maskS),
+		)
+	case "pattern":
+		minS, maxS = "3", "9"
+		fields = append(fields,
+			huh.NewInput().Title("Min pattern length (3-9)").Value(&minS),
+			huh.NewInput().Title("Max pattern length (3-9)").Value(&maxS),
+		)
+	}
+	fields = append(fields,
+		huh.NewInput().Title("Delay between attempts (ms)").Value(&delayS),
+		huh.NewInput().Title("Max attempts (0 = unlimited)").Value(&attS),
+		huh.NewConfirm().Title("Resume previous session (skip already-tried candidates)?").Value(&resume),
+	)
+	if err := huh.NewForm(huh.NewGroup(fields...)).Run(); err != nil {
+		return
+	}
+
+	cfg.MinLen, _ = strconv.Atoi(strings.TrimSpace(minS))
+	cfg.MaxLen, _ = strconv.Atoi(strings.TrimSpace(maxS))
+	cfg.Mask = strings.TrimSpace(maskS)
+	cfg.Wordlist = strings.TrimSpace(wordS)
+	if d, err := strconv.Atoi(strings.TrimSpace(delayS)); err == nil && d >= 0 {
+		cfg.Delay = time.Duration(d) * time.Millisecond
+	}
+	if a, err := strconv.Atoi(strings.TrimSpace(attS)); err == nil && a > 0 {
+		cfg.MaxAttempts = a
+	}
+	cfg.Resume = resume
+
+	ui.ClearScreen()
+	fmt.Println(ui.TitleStyle.Render("🔓 Brute-force running — Ctrl+C saves the session and exits"))
+	fmt.Println()
+
+	found, err := adb.RunLockBruteforce(serial, cfg, func(st adb.LockBruteStats) bool {
+		state := "verifying"
+		if st.Throttling {
+			state = "throttled — waiting " + st.LastWait.Round(time.Second).String()
+		}
+		fmt.Printf("\r  [%s] tried %d | skipped %d | throttled %dx | rate %.1f/s | %s   ",
+			state, st.Attempts, st.Skipped, st.Throttles, st.Rate(), st.Current)
+		return true
+	})
+	fmt.Println()
+	if err != nil {
+		ui.PrintError(err.Error())
+		if strings.Contains(err.Error(), "session saved") {
+			ui.PrintInfo("Run this option again and choose Resume to continue where you left off.")
+		}
+	} else {
+		ui.PrintSuccess("CREDENTIAL FOUND: " + found)
+	}
+	ui.Pause()
 }

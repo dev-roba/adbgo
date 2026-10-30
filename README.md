@@ -150,6 +150,28 @@ Use **Auth Menu $\to$ Export Devices** to backup or transfer registrations betwe
 
 ---
 
+## 🔐 Pentest Lab
+
+adbgo ships a throttle-aware **lockscreen credential tester** for authorized security testing — your own device, or one you have written permission to test:
+
+```bash
+# TUI: Main Menu → ⚠ DANGER ZONE → 🔓 Lockscreen Credential Tester (GOD MODE)
+
+adbgo bruteforce -type pin -min 4 -max 4 -delay 500
+adbgo bruteforce -type pin -mask 08??                    # known prefix
+adbgo bruteforce -type password -wordlist words.txt     # case & suffix mutations
+adbgo bruteforce -type pattern -min 3 -max 5            # valid 3×3 patterns only
+adbgo bruteforce -type pin -resume                       # continue a saved session
+```
+
+- **Credential oracle** via the framework's `locksettings verify` (Android 10+) — correct / incorrect / throttled, without touching the screen
+- **PIN**: frequency-ordered common PINs first, masks like `08??`, configurable charset
+- **Password**: wordlists with case + common-suffix mutations, or charset brute-force
+- **Pattern**: valid-only generation respecting Android's 3×3 skip rules (320 → 389k candidates by length)
+- **Throttle-aware**: exponential backoff (30s → 15 min cap), configurable delay + jitter, hard attempt cap
+- **Resumable**: every tried candidate is saved to `~/.config/adbgo/bruteforce/`; Ctrl+C saves and `-resume` continues
+- **Guardrails**: authorization confirmation, factory-reset wipe warning, requires GOD MODE in the TUI
+
 ## Development & Testing
 
 ```bash

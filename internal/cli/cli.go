@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/dev-roba/adbgo/internal/adb"
 	"github.com/dev-roba/adbgo/internal/ui"
@@ -29,6 +30,9 @@ func PrintHelp() {
 	fmt.Println("  shell [-s serial]           Open interactive adb shell")
 	fmt.Println("  dashboard [-s serial]       Display live battery, storage, and display status")
 	fmt.Println("  info [-s serial]            Display hardware & system properties")
+	fmt.Println("  bruteforce [flags]           Lockscreen credential tester (pin/password/pattern)")
+	fmt.Println("      -type pin|password|pattern -min N -max N -mask 08?? -wordlist file")
+	fmt.Println("      -delay 500 -jitter 150 -max-attempts N -resume")
 	fmt.Println("  update                      Check and install the latest adbgo update")
 	fmt.Println("  version                     Print version info")
 	fmt.Println()
@@ -187,6 +191,61 @@ func HandleCLI(version string) bool {
 				fmt.Println(line)
 			}
 		}
+		return true
+
+	case "bruteforce":
+		fs := flag.NewFlagSet("bruteforce", flag.ExitOnError)
+		serial := fs.String("s", "", "Device serial")
+		typ := fs.String("type", "pin", "Credential type: pin, password or pattern")
+		minLen := fs.Int("min", 4, "Minimum candidate length")
+		maxLen := fs.Int("max", 4, "Maximum candidate length")
+		charset := fs.String("charset", "", "Custom charset (default per type)")
+		mask := fs.String("mask", "", "Mask with ? wildcards, e.g. 08??")
+		wordlist := fs.String("wordlist", "", "Password mode: wordlist file")
+		delayMs := fs.Int("delay", 500, "Delay between attempts in ms")
+		jitterMs := fs.Int("jitter", 150, "Random extra delay in ms")
+		maxAttempts := fs.Int("max-attempts", 0, "Stop after N attempts (0 = unlimited)")
+		resume := fs.Bool("resume", false, "Resume previous session")
+		fs.Parse(args)
+
+		target := getOrPickDevice(*serial)
+		bMin, bMax := *minLen, *maxLen
+		if *typ == "pattern" && *minLen == 4 && *maxLen == 4 {
+			bMin, bMax = 3, 9
+		}
+
+		ui.PrintWarning("Authorized use only — your own device, or one you have written permission to test.")
+		ui.PrintWarning("If 'Erase data after 10 wrong attempts' is enabled, a failed run can FACTORY RESET the device.")
+		ui.PrintInfo(fmt.Sprintf("Testing %s credential on %s (Ctrl+C saves the session and exits)", *typ, target))
+
+		bcfg := adb.LockBruteConfig{
+			Type:        *typ,
+			MinLen:      bMin,
+			MaxLen:      bMax,
+			Charset:     *charset,
+			Mask:        *mask,
+			Wordlist:    *wordlist,
+			CommonFirst: true,
+			Delay:       time.Duration(*delayMs) * time.Millisecond,
+			Jitter:      time.Duration(*jitterMs) * time.Millisecond,
+			MaxAttempts: *maxAttempts,
+			Resume:      *resume,
+		}
+		found, err := adb.RunLockBruteforce(target, bcfg, func(st adb.LockBruteStats) bool {
+			state := "verifying"
+			if st.Throttling {
+				state = "throttled — waiting " + st.LastWait.Round(time.Second).String()
+			}
+			fmt.Printf("\r  [%s] tried %d | skipped %d | throttled %dx | rate %.1f/s | %s   ",
+				state, st.Attempts, st.Skipped, st.Throttles, st.Rate(), st.Current)
+			return true
+		})
+		fmt.Println()
+		if err != nil {
+			ui.PrintError(err.Error())
+			os.Exit(1)
+		}
+		ui.PrintSuccess("CREDENTIAL FOUND: " + found)
 		return true
 
 	case "update":
