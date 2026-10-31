@@ -2481,7 +2481,11 @@ func loadImage(path string) (image.Image, error) {
 		return nil, err
 	}
 	defer fh.Close()
-	return image.Decode(fh)
+	img, _, derr := image.Decode(fh)
+	if derr != nil {
+		return nil, derr
+	}
+	return img, nil
 }
 
 // sampleColor nearest-neighbor samples the source image at (x,y) in a
