@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dev-roba/adbgo/internal/adb"
+	"github.com/dev-roba/adbgo/internal/share"
 	"github.com/dev-roba/adbgo/internal/ui"
 	"github.com/dev-roba/adbgo/internal/update"
 )
@@ -29,6 +30,7 @@ func PrintHelp() {
 	fmt.Println("  wireless connect [serial]   Enable wireless ADB (tcpip 5555) and connect")
 	fmt.Println("  wireless pair <ip:port> <code> Pair with Android 11+ pairing code")
 	fmt.Println("  wireless disconnect <ip:port> Disconnect a wireless device")
+	fmt.Println("  wireless share [wan]         Share a link/QR that connects a phone by itself")
 	fmt.Println("  shell [-s serial]           Open interactive adb shell")
 	fmt.Println("  dashboard [-s serial]       Display live battery, storage, and display status")
 	fmt.Println("  info [-s serial]            Display hardware & system properties")
@@ -521,6 +523,7 @@ func handleWirelessCLI(args []string) {
 		fmt.Println("  adbgo wireless pair <ip:port> <code>  Pair Android 11+ device with pairing code")
 		fmt.Println("  adbgo wireless disconnect <ip:port>   Disconnect wireless device")
 		fmt.Println("  adbgo wireless scan                   Scan for mDNS wireless targets")
+	fmt.Println("  adbgo wireless share [wan]             Share a link/QR (LAN, or wan for an internet tunnel)")
 		return
 	}
 
@@ -565,6 +568,13 @@ func handleWirelessCLI(args []string) {
 			os.Exit(1)
 		}
 		ui.PrintSuccess("Disconnected " + args[1])
+
+	case "share":
+		mode := "lan"
+		if len(args) > 1 && args[1] == "wan" {
+			mode = "wan"
+		}
+		share.Run(mode)
 
 	case "scan":
 		ui.PrintInfo("Scanning mDNS for wireless Android devices...")

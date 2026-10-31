@@ -20,6 +20,7 @@ import (
 	"github.com/dev-roba/adbgo/internal/cli"
 	"github.com/dev-roba/adbgo/internal/config"
 	"github.com/dev-roba/adbgo/internal/danger"
+	"github.com/dev-roba/adbgo/internal/share"
 	"github.com/dev-roba/adbgo/internal/ui"
 	"github.com/dev-roba/adbgo/internal/update"
 
@@ -1244,6 +1245,8 @@ func wirelessFlow(serial string) {
 					huh.NewOption("Pair with Android 11+ pairing code", "pair"),
 					huh.NewOption("Connect directly to IP:Port", "direct"),
 					huh.NewOption("Scan local network for mDNS wireless devices", "scan"),
+					huh.NewOption("🔗 Share link / QR (LAN) — phone connects by opening a link", "share_lan"),
+					huh.NewOption("🌍 Share link / QR (WAN) — same, over the internet via tunnel", "share_wan"),
 					huh.NewOption("Disconnect a wireless device", "disconnect"),
 					huh.NewOption("Back", "back"),
 				).
@@ -1334,6 +1337,12 @@ func wirelessFlow(serial string) {
 				fmt.Println("  • " + t)
 			}
 		}
+
+	case "share_lan":
+		share.Run("lan")
+
+	case "share_wan":
+		share.Run("wan")
 
 	case "disconnect":
 		devices, err := adb.ListDevices()
