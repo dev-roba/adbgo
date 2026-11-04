@@ -278,6 +278,8 @@ func showMainMenu(cfg *config.Config, session *auth.Session) {
 			huh.NewOption("📦 App Management (install, extract, freeze)", "apps"),
 			huh.NewOption("📂 File & System (files, photo sync, logcat)", "files"),
 			huh.NewOption("👥 Multi-Device Mode", "multi"),
+			huh.NewOption("🔔 Notification Mirror (see phone notifications)", "notifications"),
+			huh.NewOption("📞 Find My Phone (max volume + alarm)", "findphone"),
 			huh.NewOption("🛡️ Pentest Lab (fingerprint & attack surface)", "pentest"),
 		}
 
@@ -338,6 +340,12 @@ func showMainMenu(cfg *config.Config, session *auth.Session) {
 
 		case "apps":
 			showAppManagement(session)
+
+		case "notifications":
+			notificationsFlow(session.Device.Serial)
+
+		case "findphone":
+			findPhoneFlow(session.Device.Serial)
 
 		case "files":
 			showFileSystem(session)
@@ -824,6 +832,7 @@ func showAppManagement(session *auth.Session) {
 					huh.NewOption("Install APK or Split Bundle (.apk, .xapk, .apks)", "install"),
 					huh.NewOption("Extract / Backup APK to PC", "extract"),
 					huh.NewOption("📷 Extract Photos (copy or cut from phone)", "photos"),
+					huh.NewOption("🔍 APK Triage (pull APK & static analysis)", "triage"),
 					huh.NewOption("Launch App (search by keyword)", "launch"),
 					huh.NewOption("Force-Stop App", "force_stop"),
 					huh.NewOption("Clear App Data", "clear"),
@@ -857,6 +866,9 @@ func showAppManagement(session *auth.Session) {
 
 	case "photos":
 		extractPhotosFlow(serial)
+
+	case "triage":
+		triageFlow(serial)
 
 	case "launch":
 		launchAppFlow(serial)
@@ -2527,4 +2539,153 @@ func placeholderThumb(f adb.MediaInfo) string {
 	}
 	b.WriteString("\x1b[90m" + strings.Repeat("░", pad) + " " + label + " " + strings.Repeat("░", pad) + "\x1b[0m\n")
 	return b.String()
+}
+
+// triageFlow pulls an app's APK(s) and runs a static triage: permissions,
+// dangerous permissions, tracker SDKs, URLs, potential secrets and the
+// dex/native-lib inventory. Nothing in the APK is executed.
+func triageFlow(serial string) {
+	fmt.Print("Enter package name (or keyword, e.g. whatsapp): ")
+	q := ui.ReadLine()
+	if q == "" {
+		return
+	}
+	pkg := q
+	if matches, err := adb.FindPackagesByKeyword(serial, q); err == nil {
+		if len(matches) == 1 {
+			pkg = matches[0]
+		} else if len(matches) > 1 {
+			opts := make([]huh.Option[string], len(matches))
+			for i, m := range matches {
+				opts[i] = huh.NewOption(m, m)
+			}
+			var sel string
+			selForm := huh.NewForm(huh.NewGroup(
+				huh.NewSelect[string]().
+					Title(fmt.Sprintf("%d apps match '%s' — pick one", len(matches), q)).
+					Options(opts...).
+					Value(&sel),
+			))
+			if err := selForm.Run(); err != nil || sel == "" {
+				return
+			}
+			pkg = sel
+		}
+	}
+
+	dest := filepath.Join(os.TempDir(), "adbgo-apk")
+	os.MkdirAll(dest, 0o755)
+	ui.PrintInfo("Pulling APK(s) for " + pkg + "...")
+	files, err := adb.ExtractAPK(serial, pkg, dest)
+	if err != nil {
+		ui.PrintError(err.Error())
+		ui.Pause()
+		return
+	}
+	if len(files) == 0 {
+		ui.PrintError("No APK files found.")
+		ui.Pause()
+		return
+	}
+	ui.PrintSuccess(fmt.Sprintf("Pulled %d APK file(s). Analyzing...", len(files)))
+
+	report, err := adb.TriageAPK(files[0], pkg)
+	if err != nil {
+		ui.PrintError("Triage failed: " + err.Error())
+		ui.Pause()
+		return
+	}
+	fmt.Println()
+	fmt.Println(report.Report())
+	if len(report.Dangerous) > 0 {
+		ui.PrintWarning(fmt.Sprintf("⚠ %d dangerous permission(s) found.", len(report.Dangerous)))
+	}
+	if len(report.Secrets) > 0 {
+		ui.PrintWarning(fmt.Sprintf("⚠ %d potential secret(s) found — verify before assuming they are live.", len(report.Secrets)))
+	}
+	var save bool
+	if err := huh.NewForm(huh.NewGroup(
+		huh.NewConfirm().Title("Save report as JSON?").Value(&save),
+	)).Run(); err == nil && save {
+		saveJSONReport("adbgo-triage", report)
+	}
+}
+
+// notificationsFlow mirrors the phone's notifications and can open the
+// posting app on the phone.
+func notificationsFlow(serial string) {
+	for {
+		ui.PrintInfo("Fetching notifications...")
+		notifs, err := adb.ListNotifications(serial)
+		if err != nil {
+			ui.PrintError(err.Error())
+			ui.Pause()
+			return
+		}
+		fmt.Println()
+		fmt.Printf("%-28s %-30s %s\n", "APP", "TITLE", "TEXT")
+		fmt.Println(strings.Repeat("─", 92))
+		for i, n := range notifs {
+			title := n.Title
+			if len(title) > 30 {
+				title = title[:29] + "…"
+			}
+			text := n.Text
+			if len(text) > 40 {
+				text = text[:39] + "…"
+			}
+			fmt.Printf("%-3d %-24s %-30s %s\n", i+1, n.Package, title, text)
+		}
+		fmt.Println()
+
+		opts := []huh.Option[string]{
+			huh.NewOption("🔄 Refresh", "refresh"),
+			huh.NewOption("Back", "back"),
+		}
+		for i, n := range notifs {
+			label := fmt.Sprintf("%d · %s · %s", i+1, n.Package, n.Title)
+			if len(label) > 60 {
+				label = label[:59] + "…"
+			}
+			opts = append(opts, huh.NewOption(label, fmt.Sprintf("open:%d", i)))
+		}
+		var choice string
+		selForm := huh.NewForm(huh.NewGroup(
+			huh.NewSelect[string]().Title("Notifications").Options(opts...).Value(&choice),
+		))
+		if err := selForm.Run(); err != nil || choice == "back" {
+			return
+		}
+		if choice == "refresh" {
+			continue
+		}
+		if strings.HasPrefix(choice, "open:") {
+			idx, _ := strconv.Atoi(strings.TrimPrefix(choice, "open:"))
+			if idx >= 1 && idx <= len(notifs) {
+				pkg := notifs[idx-1].Package
+				ui.PrintInfo("Opening " + pkg + " on the phone...")
+				if err := adb.LaunchApp(serial, pkg); err != nil {
+					ui.PrintError("Could not open app: " + err.Error())
+				} else {
+					ui.PrintSuccess("Opened " + pkg)
+				}
+			}
+		}
+	}
+}
+
+// findPhoneFlow rings the phone at maximum volume to locate it.
+func findPhoneFlow(serial string) {
+	var sure bool
+	if err := huh.NewForm(huh.NewGroup(
+		huh.NewConfirm().Title("Ring this phone at maximum volume?").Value(&sure),
+	)).Run(); err != nil || !sure {
+		return
+	}
+	ui.PrintInfo("Making the phone ring...")
+	if err := adb.FindMyPhone(serial); err != nil {
+		ui.PrintWarning(err.Error())
+	} else {
+		ui.PrintSuccess("🔊 Phone should be ringing — listen for the alarm / look for the screen!")
+	}
 }

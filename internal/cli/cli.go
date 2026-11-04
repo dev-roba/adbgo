@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -38,6 +39,9 @@ func PrintHelp() {
 	fmt.Println("  photos pull [-dir DIR] [-dest F] [-move -yes] Copy or cut media")
 	fmt.Println("  apps [-json]                   List installed third-party packages")
 	fmt.Println("  fingerprint [-s serial]      Security fingerprint & risk verdict")
+	fmt.Println("  notifications [-s serial] [-json]  Mirror phone notifications")
+	fmt.Println("  findmyphone [-s serial]       Max volume + alarm to locate the phone")
+	fmt.Println("  triage <pkg> [-s serial] [-json]  Pull APK & static analysis")
 	fmt.Println("  bruteforce [flags]           Lockscreen credential tester (pin/password/pattern)")
 	fmt.Println("      -type pin|password|pattern -min N -max N -mask 08?? -wordlist file")
 	fmt.Println("      -delay 500 -jitter 150 -max-attempts N -resume")
@@ -412,6 +416,89 @@ func HandleCLI(version string) bool {
 			fmt.Println(p)
 		}
 		ui.PrintInfo(fmt.Sprintf("%d package(s).", len(pkgs)))
+		return true
+
+	case "notifications":
+		fs := flag.NewFlagSet("notifications", flag.ExitOnError)
+		serial := fs.String("s", "", "Device serial")
+		jsonOut := fs.Bool("json", false, "Print as JSON")
+		fs.Parse(args)
+		target := getOrPickDevice(*serial)
+		ui.PrintInfo("Fetching notifications...")
+		notifs, err := adb.ListNotifications(target)
+		if err != nil {
+			ui.PrintError(err.Error())
+			os.Exit(1)
+		}
+		if *jsonOut {
+			data, merr := json.MarshalIndent(notifs, "", "  ")
+			if merr != nil {
+				ui.PrintError(merr.Error())
+				os.Exit(1)
+			}
+			fmt.Println(string(data))
+			return true
+		}
+		fmt.Printf("%-28s %-30s %s\n", "APP", "TITLE", "TEXT")
+		fmt.Println(strings.Repeat("─", 92))
+		for _, n := range notifs {
+			fmt.Printf("%-28s %-30s %s\n", n.Package, n.Title, n.Text)
+		}
+		return true
+
+	case "findmyphone":
+		fs := flag.NewFlagSet("findmyphone", flag.ExitOnError)
+		serial := fs.String("s", "", "Device serial")
+		fs.Parse(args)
+		target := getOrPickDevice(*serial)
+		ui.PrintInfo("Ringing " + target + "...")
+		if err := adb.FindMyPhone(target); err != nil {
+			ui.PrintWarning(err.Error())
+			return true
+		}
+		ui.PrintSuccess("🔊 Phone should be ringing!")
+		return true
+
+	case "triage":
+		if len(args) == 0 {
+			ui.PrintError("Usage: adbgo triage <package> [-s serial] [-json]")
+			os.Exit(1)
+		}
+		fs := flag.NewFlagSet("triage", flag.ExitOnError)
+		serial := fs.String("s", "", "Device serial")
+		jsonOut := fs.Bool("json", false, "Print as JSON")
+		fs.Parse(args)
+		pkg := fs.Arg(0)
+		target := getOrPickDevice(*serial)
+		dest := filepath.Join(os.TempDir(), "adbgo-apk")
+		os.MkdirAll(dest, 0o755)
+		ui.PrintInfo("Pulling APK(s) for " + pkg + "...")
+		files, err := adb.ExtractAPK(target, pkg, dest)
+		if err != nil {
+			ui.PrintError(err.Error())
+			os.Exit(1)
+		}
+		if len(files) == 0 {
+			ui.PrintError("No APK files found.")
+			return true
+		}
+		ui.PrintSuccess(fmt.Sprintf("Pulled %d APK file(s). Analyzing...", len(files)))
+		report, terr := adb.TriageAPK(files[0], pkg)
+		if terr != nil {
+			ui.PrintError("Triage failed: " + terr.Error())
+			os.Exit(1)
+		}
+		if *jsonOut {
+			data, merr := json.MarshalIndent(report, "", "  ")
+			if merr != nil {
+				ui.PrintError(merr.Error())
+				os.Exit(1)
+			}
+			fmt.Println(string(data))
+			return true
+		}
+		fmt.Println()
+		fmt.Println(report.Report())
 		return true
 
 	case "bruteforce":
