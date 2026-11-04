@@ -20,9 +20,12 @@ import (
 	"github.com/dev-roba/adbgo/internal/cli"
 	"github.com/dev-roba/adbgo/internal/config"
 	"github.com/dev-roba/adbgo/internal/danger"
+	"github.com/dev-roba/adbgo/internal/qr"
+	"github.com/dev-roba/adbgo/internal/relay"
 	"github.com/dev-roba/adbgo/internal/share"
 	"github.com/dev-roba/adbgo/internal/ui"
 	"github.com/dev-roba/adbgo/internal/update"
+	"github.com/dev-roba/adbgo/internal/webpanel"
 
 	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
@@ -265,6 +268,9 @@ func showMainMenu(cfg *config.Config, session *auth.Session) {
 		}
 
 		ui.PrintBanner(session.GodMode, session.Device.Name, session.Device.Serial)
+		if line := adb.HealthLine(session.Device.Serial); line != "" {
+			fmt.Println(line)
+		}
 
 		var choice string
 
@@ -1257,6 +1263,15 @@ func wirelessFlow(serial string) {
 					huh.NewOption("Pair with Android 11+ pairing code", "pair"),
 					huh.NewOption("Connect directly to IP:Port", "direct"),
 					huh.NewOption("Scan local network for mDNS wireless devices", "scan"),
+					huh.NewOption("📲 Smart connect (USB → mDNS → saved → LAN sweep)", "smart"),
+					huh.NewOption("🔳 Pair with QR code (phone scans, zero typing)", "pairqr"),
+					huh.NewOption("📡 LAN recon (sweep for phones with port 5555 open)", "recon"),
+					huh.NewOption("🤝 Device radar (auto-connect when a phone joins Wi-Fi)", "radar"),
+					huh.NewOption("👀 Watchdog (monitor, auto-reconnect, desktop alerts)", "watch"),
+					huh.NewOption("🌐 Web panel (control the phone from any browser)", "web"),
+					huh.NewOption("🚇 Tunnel manager (SSH reverse tunnels, frp config)", "tunnel"),
+					huh.NewOption("🔗 Relay (token-gated sharing between two machines)", "relay"),
+					huh.NewOption("🕸 Mesh (run a shell command on ALL connected phones)", "mesh"),
 					huh.NewOption("🔗 Share link / QR (LAN) — phone connects by opening a link", "share_lan"),
 					huh.NewOption("🌍 Share link / QR (WAN) — same, over the internet via tunnel", "share_wan"),
 					huh.NewOption("Disconnect a wireless device", "disconnect"),
@@ -1355,6 +1370,33 @@ func wirelessFlow(serial string) {
 
 	case "share_wan":
 		share.Run("wan")
+
+	case "smart":
+		smartConnectFlow()
+
+	case "pairqr":
+		pairQRFlow()
+
+	case "recon":
+		lanReconFlow()
+
+	case "radar":
+		radarFlow()
+
+	case "watch":
+		watchdogFlow()
+
+	case "web":
+		webPanelFlow(serial)
+
+	case "tunnel":
+		tunnelFlow()
+
+	case "relay":
+		relayFlow()
+
+	case "mesh":
+		meshExecFlow()
 
 	case "disconnect":
 		devices, err := adb.ListDevices()
@@ -2687,5 +2729,359 @@ func findPhoneFlow(serial string) {
 		ui.PrintWarning(err.Error())
 	} else {
 		ui.PrintSuccess("🔊 Phone should be ringing — listen for the alarm / look for the screen!")
+	}
+}
+
+// smartConnectFlow runs the one-command connect chain.
+func smartConnectFlow() {
+	fmt.Print("Phone to connect (name/model, blank = any): ")
+	name := ui.ReadLine()
+	ui.PrintInfo("Connect chain: USB → mDNS → saved → LAN sweep...")
+	serial, how, err := adb.SmartConnect(name, func(msg string) { ui.PrintInfo(msg) })
+	if err != nil {
+		ui.PrintError(err.Error())
+		return
+	}
+	ui.PrintSuccess("Connected via " + how + " → " + serial)
+	ui.PrintInfo("Tip: register '" + serial + "' via Signup to log in over Wi-Fi without a cable.")
+}
+
+// pairQRFlow shows the QR the phone scans and pairs automatically.
+func pairQRFlow() {
+	payload, name, code := adb.GeneratePairQR()
+	ui.ClearScreen()
+	fmt.Println(ui.TitleStyle.Render("🔳 QR pairing — zero typing"))
+	fmt.Println()
+	fmt.Println("  1. On the phone: Settings → Developer options → Wireless debugging")
+	fmt.Println("  2. Tap 'Pair device with QR code' and scan the QR below.")
+	fmt.Println()
+	fmt.Println("  Service: " + name + "    Code: " + code)
+	fmt.Println()
+	mat, err := qr.Encode(payload)
+	if err == nil {
+		fmt.Println(qr.RenderANSI(mat))
+	} else {
+		ui.PrintWarning("Could not render QR: " + err.Error())
+	}
+	ui.PrintInfo("Waiting for the phone over mDNS (same Wi-Fi, up to 120s)...")
+	addr, werr := adb.WaitForPairingService(name, 120*time.Second, nil)
+	if werr != nil {
+		ui.PrintError(werr.Error())
+		return
+	}
+	ui.PrintInfo("Phone appeared at " + addr + " — pairing...")
+	out, perr := adb.PairWithAddr(addr, code)
+	if perr != nil {
+		ui.PrintError("Pairing failed: " + perr.Error())
+		ui.PrintInfo("Raw adb output: " + strings.TrimSpace(out))
+		return
+	}
+	ui.PrintSuccess("Paired! " + strings.TrimSpace(out))
+	ui.PrintInfo("Now connect via 'Connect directly to IP:Port' (main wireless debugging port),")
+	ui.PrintInfo("or run Smart connect — this phone is remembered from now on.")
+}
+
+// lanReconFlow sweeps the local network for phones with adbd exposed.
+func lanReconFlow() {
+	ui.PrintWarning("Authorized use only — scan networks you own.")
+	ui.PrintInfo("Sweeping local subnets for port 5555 (takes ~10s)...")
+	targets, err := adb.ScanLANPorts(5555, func(done, total int) {
+		fmt.Printf("\r  probing %d/%d hosts...", done, total)
+	})
+	fmt.Println()
+	if err != nil {
+		ui.PrintError(err.Error())
+		return
+	}
+	if len(targets) == 0 {
+		ui.PrintWarning("No devices with port 5555 open. Enable wireless debugging on the phone first.")
+		return
+	}
+	ui.PrintSuccess(fmt.Sprintf("Found %d target(s):", len(targets)))
+	for _, t := range targets {
+		fmt.Println("  • " + t)
+	}
+	opts := make([]huh.Option[string], 0, len(targets)+1)
+	opts = append(opts, huh.NewOption("Skip — don't connect", ""))
+	for _, t := range targets {
+		opts = append(opts, huh.NewOption(t, t))
+	}
+	var sel string
+	form := huh.NewForm(huh.NewGroup(
+		huh.NewSelect[string]().Title("Connect to which?").Options(opts...).Value(&sel),
+	))
+	if err := form.Run(); err != nil || sel == "" {
+		return
+	}
+	if err := adb.ConnectDirect(sel); err != nil {
+		ui.PrintError(err.Error())
+		return
+	}
+	ui.PrintSuccess("Connected to " + sel)
+}
+
+// radarFlow auto-connects phones the moment they join the network.
+func radarFlow() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	fmt.Println(ui.DimStyle.Render("🤝 Radar running — press Enter to stop."))
+	go func() {
+		adb.Radar(stop, func(msg string) { ui.PrintSuccess(msg) })
+		close(done)
+	}()
+	ui.ReadLine()
+	close(stop)
+	<-done
+}
+
+// watchdogFlow monitors the phone and fires desktop notifications.
+func watchdogFlow() {
+	fmt.Print("Watch what? (ip:port, serial, or blank = any device): ")
+	target := ui.ReadLine()
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	fmt.Println()
+	fmt.Println(ui.DimStyle.Render("👀 Watchdog running — press Enter to stop."))
+	go func() {
+		adb.Watchdog(stop, target, func(event, msg string) {
+			if event == "connect" {
+				ui.PrintSuccess("📱 Connected (" + msg + ")")
+			} else {
+				ui.PrintWarning("📵 Phone left the network — did you forget it somewhere?")
+			}
+		})
+		close(done)
+	}()
+	ui.ReadLine()
+	close(stop)
+	<-done
+}
+
+// webPanelFlow serves the browser control panel.
+func webPanelFlow(serial string) {
+	var mode string
+	form := huh.NewForm(huh.NewGroup(
+		huh.NewSelect[string]().
+			Title("🌐 Web panel").
+			Options(
+				huh.NewOption("LAN (same Wi-Fi)", "lan"),
+				huh.NewOption("WAN (internet via pinggy tunnel)", "wan"),
+			).
+			Value(&mode),
+	))
+	if err := form.Run(); err != nil || mode == "" {
+		return
+	}
+	webpanel.Run(serial, mode)
+}
+
+// tunnelFlow manages SSH reverse tunnels exposing adbgo services on a VPS.
+func tunnelFlow() {
+	var action string
+	form := huh.NewForm(huh.NewGroup(
+		huh.NewSelect[string]().
+			Title("🚇 Tunnel manager").
+			Options(
+				huh.NewOption("Up — start / replace a tunnel", "up"),
+				huh.NewOption("Down — stop a tunnel", "down"),
+				huh.NewOption("List tunnels", "list"),
+				huh.NewOption("Generate frp config (both-behind-NAT)", "frp"),
+			).
+			Value(&action),
+	))
+	if err := form.Run(); err != nil || action == "" {
+		return
+	}
+
+	switch action {
+	case "up":
+		var name, via, localS, remoteS string
+		f := huh.NewForm(huh.NewGroup(
+			huh.NewInput().Title("Tunnel name (e.g. pixel)").Value(&name),
+			huh.NewInput().Title("SSH target (user@vps)").Value(&via),
+			huh.NewInput().Title("Local port to expose (e.g. 8080)").Value(&localS),
+			huh.NewInput().Title("Remote port on the VPS (e.g. 8080)").Value(&remoteS),
+		))
+		if err := f.Run(); err != nil {
+			return
+		}
+		local, _ := strconv.Atoi(strings.TrimSpace(localS))
+		remote, _ := strconv.Atoi(strings.TrimSpace(remoteS))
+		if strings.TrimSpace(via) == "" || local <= 0 || remote <= 0 {
+			ui.PrintError("SSH target and both ports are required.")
+			return
+		}
+		var t adb.Tunnel
+		t.Name = strings.TrimSpace(name)
+		t.Via = strings.TrimSpace(via)
+		t.LocalPort = local
+		t.RemotePort = remote
+		t.Created = time.Now().Format("2006-01-02 15:04")
+		go func() { _ = adb.TunnelUp(t) }()
+		ui.PrintSuccess("Tunnel '" + t.Name + "' up: " + t.Via + ":" + remoteS + " → localhost:" + localS + " (auto-heal on drop)")
+
+	case "down":
+		tunnels := adb.LoadTunnels()
+		if len(tunnels) == 0 {
+			ui.PrintWarning("No saved tunnels.")
+			return
+		}
+		opts := make([]huh.Option[string], 0, len(tunnels))
+		for _, t := range tunnels {
+			opts = append(opts, huh.NewOption(t.Name+" → "+t.Via, t.Name))
+		}
+		var sel string
+		selForm := huh.NewForm(huh.NewGroup(
+			huh.NewSelect[string]().Title("Stop which tunnel?").Options(opts...).Value(&sel),
+		))
+		if err := selForm.Run(); err != nil || sel == "" {
+			return
+		}
+		adb.TunnelDown(sel)
+		ui.PrintSuccess("Stopped " + sel)
+
+	case "list":
+		tunnels := adb.LoadTunnels()
+		if len(tunnels) == 0 {
+			ui.PrintWarning("No saved tunnels.")
+			return
+		}
+		for _, t := range tunnels {
+			status := "stopped"
+			if adb.TunnelRunning(t.Name) {
+				status = "running"
+			}
+			fmt.Printf("  %-12s %-24s localhost:%d → %s:%d  [%s]\n", t.Name, t.Via, t.LocalPort, t.Via, t.RemotePort, status)
+		}
+
+	case "frp":
+		var name, server, localS, remoteS string
+		f := huh.NewForm(huh.NewGroup(
+			huh.NewInput().Title("Config name").Value(&name),
+			huh.NewInput().Title("frps server address (domain or IP)").Value(&server),
+			huh.NewInput().Title("Local port").Value(&localS),
+			huh.NewInput().Title("Remote port on the frps server").Value(&remoteS),
+		))
+		if err := f.Run(); err != nil {
+			return
+		}
+		local, _ := strconv.Atoi(strings.TrimSpace(localS))
+		remote, _ := strconv.Atoi(strings.TrimSpace(remoteS))
+		path, err := adb.GenFRPConfig(strings.TrimSpace(name), strings.TrimSpace(server), local, remote)
+		if err != nil {
+			ui.PrintError(err.Error())
+			return
+		}
+		ui.PrintSuccess("frp config written: " + path)
+		ui.PrintInfo("Run it with: frpc -c " + path)
+	}
+}
+
+// relayFlow shares a device between two machines through a rendezvous.
+func relayFlow() {
+	var action string
+	form := huh.NewForm(huh.NewGroup(
+		huh.NewSelect[string]().
+			Title("🔗 Relay — token-gated sharing").
+			Options(
+				huh.NewOption("Serve — run the rendezvous (on a VPS)", "serve"),
+				huh.NewOption("Expose — offer a local port through the relay", "expose"),
+				huh.NewOption("Connect — reach an exposed port locally", "connect"),
+			).
+			Value(&action),
+	))
+	if err := form.Run(); err != nil || action == "" {
+		return
+	}
+
+	switch action {
+	case "serve":
+		var port, token string
+		f := huh.NewForm(huh.NewGroup(
+			huh.NewInput().Title("Listen port (e.g. 17000)").Value(&port),
+			huh.NewInput().Title("Shared secret token").Value(&token),
+		))
+		if err := f.Run(); err != nil || token == "" {
+			return
+		}
+		if port == "" {
+			port = "17000"
+		}
+		ui.PrintInfo("Rendezvous listening on port " + port + " — Ctrl+C to stop.")
+		if err := relay.Serve(port, token); err != nil {
+			ui.PrintError(err.Error())
+		}
+
+	case "expose":
+		var host, token, service string
+		f := huh.NewForm(huh.NewGroup(
+			huh.NewInput().Title("Relay host (vps:17000)").Value(&host),
+			huh.NewInput().Title("Shared secret token").Value(&token),
+			huh.NewInput().Title("Local service to expose (localhost:5555)").Value(&service),
+		))
+		if err := f.Run(); err != nil || host == "" || token == "" {
+			return
+		}
+		if service == "" {
+			service = "localhost:5555"
+		}
+		ui.PrintInfo("Exposing " + service + " through " + host + " — Ctrl+C to stop.")
+		if err := relay.Expose(host, token, service); err != nil {
+			ui.PrintError(err.Error())
+		}
+
+	case "connect":
+		var host, token, listenS string
+		f := huh.NewForm(huh.NewGroup(
+			huh.NewInput().Title("Relay host (vps:17000)").Value(&host),
+			huh.NewInput().Title("Shared secret token").Value(&token),
+			huh.NewInput().Title("Local listen port (e.g. 5556)").Value(&listenS),
+		))
+		if err := f.Run(); err != nil || host == "" || token == "" {
+			return
+		}
+		if listenS == "" {
+			listenS = "5556"
+		}
+		listen, _ := strconv.Atoi(listenS)
+		ui.PrintInfo("Tunnel ready — point your tools at 127.0.0.1:" + listenS)
+		if err := relay.Connect(host, token, listen); err != nil {
+			ui.PrintError(err.Error())
+		}
+	}
+}
+
+// meshExecFlow runs one shell command on every connected phone.
+func meshExecFlow() {
+	devices, err := adb.ListDevices()
+	if err != nil {
+		ui.PrintError(err.Error())
+		return
+	}
+	var online []adb.DeviceInfo
+	for _, d := range devices {
+		if d.Status == "device" {
+			online = append(online, d)
+		}
+	}
+	if len(online) == 0 {
+		ui.PrintError("No online devices.")
+		return
+	}
+	fmt.Print(fmt.Sprintf("Shell command to run on all %d phone(s): ", len(online)))
+	command := ui.ReadLine()
+	if command == "" {
+		return
+	}
+	fmt.Println()
+	for _, d := range online {
+		out, cerr := adb.Run(d.Serial, "shell", command)
+		status := "✓"
+		if cerr != nil {
+			status = "✗"
+		}
+		fmt.Println(ui.Highlight.Render(d.Serial) + "  " + status)
+		fmt.Println(strings.TrimSpace(out))
+		fmt.Println()
 	}
 }

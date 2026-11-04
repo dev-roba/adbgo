@@ -11,9 +11,12 @@ import (
 	"time"
 
 	"github.com/dev-roba/adbgo/internal/adb"
+	"github.com/dev-roba/adbgo/internal/qr"
+	"github.com/dev-roba/adbgo/internal/relay"
 	"github.com/dev-roba/adbgo/internal/share"
 	"github.com/dev-roba/adbgo/internal/ui"
 	"github.com/dev-roba/adbgo/internal/update"
+	"github.com/dev-roba/adbgo/internal/webpanel"
 )
 
 // PrintHelp displays CLI usage for direct command execution.
@@ -45,6 +48,15 @@ func PrintHelp() {
 	fmt.Println("  bruteforce [flags]           Lockscreen credential tester (pin/password/pattern)")
 	fmt.Println("      -type pin|password|pattern -min N -max N -mask 08?? -wordlist file")
 	fmt.Println("      -delay 500 -jitter 150 -max-attempts N -resume")
+	fmt.Println("  connect [name]              Smart connect: USB → mDNS → saved → LAN sweep")
+	fmt.Println("  pairqr                      QR pairing: the phone scans, adbgo pairs")
+	fmt.Println("  watch [-s serial|target]    Watchdog: auto-reconnect + desktop alerts")
+	fmt.Println("  radar                       Auto-connect phones as they join Wi-Fi")
+	fmt.Println("  recon                       Sweep your LAN for port 5555 (own network)")
+	fmt.Println("  web [-s serial] [-wan]      Browser control panel (tap, type, keys)")
+	fmt.Println("  tunnel up|down|list|gen-frp  SSH reverse tunnel manager")
+	fmt.Println("  relay serve|expose|connect  Token-gated relay between two machines")
+	fmt.Println("  exec [-s serial] [--all] \"cmd\"  Run a shell command on device(s)")
 	fmt.Println("  update                      Check and install the latest adbgo update")
 	fmt.Println("  version                     Print version info")
 	fmt.Println()
@@ -501,6 +513,151 @@ func HandleCLI(version string) bool {
 		fmt.Println(report.Report())
 		return true
 
+	case "connect":
+		name := ""
+		if len(args) > 0 {
+			name = args[0]
+		}
+		ui.PrintInfo("Connect chain: USB → mDNS → saved → LAN sweep...")
+		serial, how, err := adb.SmartConnect(name, func(msg string) { ui.PrintInfo(msg) })
+		if err != nil {
+			ui.PrintError(err.Error())
+			os.Exit(1)
+		}
+		ui.PrintSuccess("Connected via " + how + " → " + serial)
+		return true
+
+	case "pairqr":
+		payload, name, code := adb.GeneratePairQR()
+		mat, qerr := qr.Encode(payload)
+		fmt.Println("On the phone: Settings → Developer options → Wireless debugging → Pair device with QR code")
+		fmt.Println("Service: " + name + "    Code: " + code)
+		if qerr == nil {
+			fmt.Println(qr.RenderANSI(mat))
+		}
+		ui.PrintInfo("Waiting for the phone over mDNS (up to 120s)...")
+		addr, werr := adb.WaitForPairingService(name, 120*time.Second, nil)
+		if werr != nil {
+			ui.PrintError(werr.Error())
+			os.Exit(1)
+		}
+		out, perr := adb.PairWithAddr(addr, code)
+		if perr != nil {
+			ui.PrintError("Pairing failed: " + perr.Error() + " " + strings.TrimSpace(out))
+			os.Exit(1)
+		}
+		ui.PrintSuccess("Paired: " + strings.TrimSpace(out))
+		return true
+
+	case "watch":
+		fs := flag.NewFlagSet("watch", flag.ExitOnError)
+		serial := fs.String("s", "", "Device serial or ip:port to watch")
+		fs.Parse(args)
+		target := *serial
+		if target == "" && fs.NArg() > 0 {
+			target = fs.Arg(0)
+		}
+		ui.PrintInfo("Watchdog running — Ctrl+C to stop. Desktop alerts on connect/disconnect.")
+		adb.Watchdog(nil, target, func(event, msg string) {
+			if event == "connect" {
+				ui.PrintSuccess("📱 connected (" + msg + ")")
+			} else {
+				ui.PrintWarning("📵 disconnected — did you forget it somewhere?")
+			}
+		})
+		return true
+
+	case "radar":
+		ui.PrintInfo("Radar running — Ctrl+C to stop. Phones auto-connect when they join the Wi-Fi.")
+		adb.Radar(nil, func(msg string) { ui.PrintSuccess(msg) })
+		return true
+
+	case "recon":
+		ui.PrintWarning("Authorized use only — scan networks you own.")
+		ui.PrintInfo("Sweeping local subnets for port 5555 (takes ~10s)...")
+		targets, err := adb.ScanLANPorts(5555, func(done, total int) {
+			fmt.Printf("\r  probing %d/%d hosts...", done, total)
+		})
+		fmt.Println()
+		if err != nil {
+			ui.PrintError(err.Error())
+			os.Exit(1)
+		}
+		if len(targets) == 0 {
+			ui.PrintWarning("No devices with port 5555 open.")
+			return true
+		}
+		for _, t := range targets {
+			fmt.Println("  • " + t)
+		}
+		ui.PrintInfo("Connect one with: adbgo connect <ip:5555>")
+		return true
+
+	case "web":
+		fs := flag.NewFlagSet("web", flag.ExitOnError)
+		serial := fs.String("s", "", "Device serial")
+		wan := fs.Bool("wan", false, "Expose over the internet via pinggy")
+		fs.Parse(args)
+		target := getOrPickDevice(*serial)
+		mode := "lan"
+		if *wan {
+			mode = "wan"
+		}
+		webpanel.Run(target, mode)
+		return true
+
+	case "tunnel":
+		handleTunnelCLI(args)
+		return true
+
+	case "relay":
+		handleRelayCLI(args)
+		return true
+
+	case "exec":
+		fs := flag.NewFlagSet("exec", flag.ExitOnError)
+		serial := fs.String("s", "", "Device serial")
+		all := fs.Bool("all", false, "Run on ALL connected devices")
+		fs.Parse(args)
+		if fs.NArg() < 1 {
+			ui.PrintError("Usage: adbgo exec [-s serial] [--all] \"shell command\"")
+			os.Exit(1)
+		}
+		command := fs.Arg(0)
+		if *all {
+			devices, derr := adb.ListDevices()
+			if derr != nil {
+				ui.PrintError(derr.Error())
+				os.Exit(1)
+			}
+			ran := false
+			for _, d := range devices {
+				if d.Status != "device" {
+					continue
+				}
+				ran = true
+				out, cerr := adb.Run(d.Serial, "shell", command)
+				status := "✓"
+				if cerr != nil {
+					status = "✗"
+				}
+				fmt.Println(ui.Highlight.Render(d.Serial) + "  " + status)
+				fmt.Println(strings.TrimSpace(out))
+				fmt.Println()
+			}
+			if !ran {
+				ui.PrintWarning("No online devices.")
+			}
+			return true
+		}
+		target := getOrPickDevice(*serial)
+		out, cerr := adb.Run(target, "shell", command)
+		if cerr != nil {
+			ui.PrintError(cerr.Error())
+		}
+		fmt.Println(out)
+		return true
+
 	case "bruteforce":
 		fs := flag.NewFlagSet("bruteforce", flag.ExitOnError)
 		serial := fs.String("s", "", "Device serial")
@@ -718,4 +875,143 @@ func showDashboardCLI(serial string) {
 		}
 	}
 	fmt.Println()
+}
+
+// handleTunnelCLI implements the `adbgo tunnel` subcommands.
+func handleTunnelCLI(args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage:")
+		fmt.Println("  adbgo tunnel up <name> -via user@vps -local 8080 -remote 8080")
+		fmt.Println("  adbgo tunnel down <name>")
+		fmt.Println("  adbgo tunnel list")
+		fmt.Println("  adbgo tunnel gen-frp <name> -server vps.example.com -local 5555 -remote 15555")
+		return
+	}
+	switch args[0] {
+	case "up":
+		fs := flag.NewFlagSet("tunnel up", flag.ExitOnError)
+		via := fs.String("via", "", "SSH target user@vps")
+		local := fs.Int("local", 0, "Local port to expose")
+		remote := fs.Int("remote", 0, "Remote port on the VPS")
+		fs.Parse(args[1:])
+		if fs.NArg() < 1 || *via == "" || *local <= 0 || *remote <= 0 {
+			ui.PrintError("Usage: adbgo tunnel up <name> -via user@vps -local 8080 -remote 8080")
+			os.Exit(1)
+		}
+		var t adb.Tunnel
+		t.Name = fs.Arg(0)
+		t.Via = *via
+		t.LocalPort = *local
+		t.RemotePort = *remote
+		t.Created = time.Now().Format("2006-01-02 15:04")
+		ui.PrintInfo("Tunnel up — Ctrl+C to stop (auto-heals if the connection drops).")
+		if err := adb.TunnelUp(t); err != nil {
+			ui.PrintError(err.Error())
+			os.Exit(1)
+		}
+
+	case "down":
+		if len(args) < 2 {
+			ui.PrintError("Usage: adbgo tunnel down <name>")
+			os.Exit(1)
+		}
+		adb.TunnelDown(args[1])
+		ui.PrintSuccess("Stopped " + args[1])
+
+	case "list":
+		tunnels := adb.LoadTunnels()
+		if len(tunnels) == 0 {
+			ui.PrintWarning("No saved tunnels.")
+			return
+		}
+		for _, t := range tunnels {
+			status := "stopped"
+			if adb.TunnelRunning(t.Name) {
+				status = "running"
+			}
+			fmt.Printf("  %-12s %-24s localhost:%-5d → remote:%d  [%s]\n", t.Name, t.Via, t.LocalPort, t.RemotePort, status)
+		}
+
+	case "gen-frp":
+		fs := flag.NewFlagSet("tunnel gen-frp", flag.ExitOnError)
+		server := fs.String("server", "", "frps server address")
+		local := fs.Int("local", 0, "Local port")
+		remote := fs.Int("remote", 0, "Remote port on the frps server")
+		fs.Parse(args[1:])
+		if fs.NArg() < 1 || *server == "" || *local <= 0 || *remote <= 0 {
+			ui.PrintError("Usage: adbgo tunnel gen-frp <name> -server vps.example.com -local 5555 -remote 15555")
+			os.Exit(1)
+		}
+		path, err := adb.GenFRPConfig(fs.Arg(0), *server, *local, *remote)
+		if err != nil {
+			ui.PrintError(err.Error())
+			os.Exit(1)
+		}
+		ui.PrintSuccess("frp config written: " + path)
+		ui.PrintInfo("Run it with: frpc -c " + path)
+
+	default:
+		ui.PrintError("Unknown tunnel subcommand: " + args[0])
+		os.Exit(1)
+	}
+}
+
+// handleRelayCLI implements the `adbgo relay` subcommands.
+func handleRelayCLI(args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage:")
+		fmt.Println("  adbgo relay serve -port 17000 -token SECRET")
+		fmt.Println("  adbgo relay expose -host vps:17000 -token SECRET -service localhost:5555")
+		fmt.Println("  adbgo relay connect -host vps:17000 -token SECRET -listen 5556")
+		return
+	}
+	switch args[0] {
+	case "serve":
+		fs := flag.NewFlagSet("relay serve", flag.ExitOnError)
+		port := fs.String("port", "17000", "Listen port")
+		token := fs.String("token", "", "Shared secret token")
+		fs.Parse(args[1:])
+		if *token == "" {
+			ui.PrintError("A -token is required")
+			os.Exit(1)
+		}
+		if err := relay.Serve(*port, *token); err != nil {
+			ui.PrintError(err.Error())
+			os.Exit(1)
+		}
+
+	case "expose":
+		fs := flag.NewFlagSet("relay expose", flag.ExitOnError)
+		host := fs.String("host", "", "Relay host (vps:17000)")
+		token := fs.String("token", "", "Shared secret token")
+		service := fs.String("service", "localhost:5555", "Local TCP service to expose")
+		fs.Parse(args[1:])
+		if *host == "" || *token == "" {
+			ui.PrintError("-host and -token are required")
+			os.Exit(1)
+		}
+		if err := relay.Expose(*host, *token, *service); err != nil {
+			ui.PrintError(err.Error())
+			os.Exit(1)
+		}
+
+	case "connect":
+		fs := flag.NewFlagSet("relay connect", flag.ExitOnError)
+		host := fs.String("host", "", "Relay host (vps:17000)")
+		token := fs.String("token", "", "Shared secret token")
+		listen := fs.Int("listen", 5556, "Local port to serve the tunnel on")
+		fs.Parse(args[1:])
+		if *host == "" || *token == "" {
+			ui.PrintError("-host and -token are required")
+			os.Exit(1)
+		}
+		if err := relay.Connect(*host, *token, *listen); err != nil {
+			ui.PrintError(err.Error())
+			os.Exit(1)
+		}
+
+	default:
+		ui.PrintError("Unknown relay subcommand: " + args[0])
+		os.Exit(1)
+	}
 }
