@@ -391,3 +391,13 @@ async function doConnect() {
 poll();
 setInterval(poll, 3000);
 </script></body></html>`
+
+// NewToken returns a random session token (exported for the web panel).
+func NewToken() string { return newToken() }
+
+// LanIP returns this machine's LAN IP (exported for the web panel).
+func LanIP() string { return lanIP() }
+
+// StartTunnel opens a free pinggy.io internet tunnel to a local port
+// (exported for the web panel's WAN mode).
+func StartTunnel(localPort int) (string, *exec.Cmd, error) { return startPinggy(localPort) }
