@@ -16,23 +16,28 @@ func shquote(s string) string {
 }
 
 // FindMyPhone makes a connected phone as loud and visible as possible.
-// Belt and braces: every volume stream maxed (including the alarm stream,
-// which was previously forgotten), the screen woken and keyguard
-// dismissed, the last media session resumed for instant noise, a highly
-// visible notification posted, and, when the device clock app answers
-// android.intent.action.SET_ALARM, a real alarm scheduled two minutes
-// out that rings even in silent mode. It returns a summary of what
-// actually worked, so the user knows exactly what to expect.
+// Belt and braces: every volume stream maxed (including the alarm
+// stream), Do-not-disturb lifted best-effort, the screen woken and
+// keyguard dismissed, a 10-second clock-app timer armed (the fast
+// ringer), a two-minute clock-app alarm as backup, the last media
+// session resumed for instant noise, vibration buzzes, and a visible
+// notification. Timer and alarm fire on the alarm stream, which rings
+// even in silent mode. It returns a summary of what actually worked,
+// so the user knows exactly what to expect.
 func FindMyPhone(serial string) (string, error) {
-	// The phone must actually respond, or everything below would silently
-	// do nothing and mislead the user.
+	// The phone must actually respond, or everything below would
+	// silently do nothing and mislead the user.
 	if out, err := Run(serial, "shell", "echo", "adbgo"); err != nil || strings.TrimSpace(out) != "adbgo" {
 		return "", fmt.Errorf("device %s is not responding over adb", serial)
 	}
 
 	var steps []string
 
-	// 1. Max the volume streams: 2 ring, 3 music, 4 alarm, 5 notification.
+	// 1. Some devices mute alarms and media while Do-not-disturb is on;
+	// try to lift it. Best effort.
+	_, _ = Run(serial, "shell", "cmd", "notification", "set_dnd", "off")
+
+	// 2. Max the volume streams: 2 ring, 3 music, 4 alarm, 5 notification.
 	// Indexes above a stream maximum are clamped by the device, so after
 	// the classic 15 we also attempt 30 for devices with finer steps.
 	for _, stream := range []string{"2", "3", "4", "5"} {
@@ -47,26 +52,19 @@ func FindMyPhone(serial string) (string, error) {
 		}
 	}
 
-	// 2. Wake the screen and dismiss the keyguard so the phone is lit.
+	// 3. Wake the screen and dismiss the keyguard so the phone is lit.
 	_, _ = Run(serial, "shell", "input", "keyevent", "KEYCODE_WAKEUP")
 	_, _ = Run(serial, "shell", "wm", "dismiss-keyguard")
 	steps = append(steps, "screen woken")
 
-	// 3. Instant noise: resume the most recent media session. Whatever was
-	// last playing (music, podcast, video) now blasts at maximum volume.
-	played := false
-	if _, err := Run(serial, "shell", "cmd", "media_session", "dispatch", "play"); err == nil {
-		played = true
-	}
-	if _, err := Run(serial, "shell", "input", "keyevent", "KEYCODE_MEDIA_PLAY"); err == nil {
-		played = true
-	}
-	if played {
-		steps = append(steps, "last media resumed (loud if something was recently playing)")
+	// 4. The fast ringer: a 10-second timer armed through the clock app.
+	// It rings on the alarm stream, even in silent mode, within seconds.
+	if out, err := Run(serial, "shell", timerCmd(10)); err == nil && !amFailed(out) {
+		steps = append(steps, "timer ringing in ~10 seconds (fires even in silent mode)")
 	}
 
-	// 4. The guaranteed ringer: a real alarm two minutes out, which fires
-	// on the alarm stream even in silent or DND mode.
+	// 5. The backup ringer: a real alarm two minutes out, in case the
+	// timer request is refused or the timer gets dismissed by accident.
 	if h, m, err := nextAlarmTime(serial); err == nil {
 		alarmCmd := "am start -a android.intent.action.SET_ALARM" +
 			" --ez android.intent.extra.alarm.SKIP_UI true" +
@@ -79,7 +77,35 @@ func FindMyPhone(serial string) (string, error) {
 		}
 	}
 
-	// 5. A visible notification so the lit screen says where the phone is.
+	// 6. Instant noise: resume the most recent media session. Whatever
+	// was last playing (music, podcast, video) now blasts at max volume.
+	played := false
+	if _, err := Run(serial, "shell", "cmd", "media_session", "dispatch", "play"); err == nil {
+		played = true
+	}
+	if _, err := Run(serial, "shell", "input", "keyevent", "KEYCODE_MEDIA_PLAY"); err == nil {
+		played = true
+	}
+	if played {
+		steps = append(steps, "last media resumed (loud if something was recently playing)")
+	}
+
+	// 7. Best-effort vibration buzzes, for phones face-down or buried
+	// under a cushion. Command syntax varies across Android versions,
+	// so several spellings are tried.
+	buzzed := false
+	for _, spec := range []string{"oneshot 3000", "waveform 2000,1000,2000", "predefined heavy_click", "predefined heavy"} {
+		out, err := Run(serial, "shell", append([]string{"cmd", "vibrator"}, strings.Fields(spec)...)...)
+		if err == nil && !strings.Contains(strings.ToLower(out), "error") {
+			buzzed = true
+			break
+		}
+	}
+	if buzzed {
+		steps = append(steps, "vibration buzz requested")
+	}
+
+	// 8. A visible notification so the lit screen says where the phone is.
 	postStyled := "cmd notification post -S bigtext -t " + shquote("adbgo — FIND ME") +
 		" adbgo-find " + shquote("📞 Your phone is HERE — sent from adbgo")
 	postPlain := "cmd notification post -t " + shquote("adbgo — FIND ME") +
@@ -98,6 +124,16 @@ func FindMyPhone(serial string) (string, error) {
 	}
 
 	return strings.Join(steps, "; "), nil
+}
+
+// timerCmd builds an 'am start' command that arms a clock-app timer,
+// without opening any UI, that fires length seconds from now.
+func timerCmd(length int) string {
+	return "am start -a android.intent.action.SET_TIMER" +
+		" --ez android.intent.extra.timer.SKIP_UI true" +
+		" --ez android.intent.extra.timer.VIBRATE true" +
+		" --es android.intent.extra.timer.MESSAGE " + shquote("adbgo: FIND ME") +
+		" --ei android.intent.extra.timer.LENGTH " + strconv.Itoa(length)
 }
 
 // nextAlarmTime reads the phone clock and returns a time two minutes

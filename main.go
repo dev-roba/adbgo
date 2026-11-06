@@ -2731,10 +2731,13 @@ func findPhoneFlow(serial string) {
 		return
 	}
 	ui.PrintSuccess("🔊 " + summary)
-	if strings.Contains(summary, "alarm scheduled") {
-		ui.PrintInfo("It will ring even in silent mode — swipe the alarm away on the phone when found.")
-	} else {
-		ui.PrintInfo("No clock app answered the alarm request — listen for media and look for the lit screen.")
+	switch {
+	case strings.Contains(summary, "timer ringing"):
+		ui.PrintInfo("It fires in ~10 seconds, even in silent mode — swipe the timer away on the phone when found.")
+	case strings.Contains(summary, "alarm scheduled"):
+		ui.PrintInfo("The alarm will ring even in silent mode — swipe it away on the phone when found.")
+	default:
+		ui.PrintInfo("No clock app answered — listen for media and look for the lit screen.")
 	}
 }
 

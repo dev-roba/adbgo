@@ -1,6 +1,9 @@
 package adb
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestAddMinutes(t *testing.T) {
 	if h, m, err := addMinutes("09:41", 2); err != nil || h != 9 || m != 43 {
@@ -25,6 +28,22 @@ func TestAddMinutesInvalid(t *testing.T) {
 		if _, _, err := addMinutes(in, 2); err == nil {
 			t.Fatalf("addMinutes(%q, 2) should fail", in)
 		}
+	}
+}
+
+func TestTimerCmd(t *testing.T) {
+	c := timerCmd(10)
+	if !strings.Contains(c, "android.intent.action.SET_TIMER") {
+		t.Fatalf("timerCmd missing action: %q", c)
+	}
+	if !strings.Contains(c, "android.intent.extra.timer.LENGTH 10") {
+		t.Fatalf("timerCmd missing length: %q", c)
+	}
+	if !strings.Contains(c, "SKIP_UI true") {
+		t.Fatalf("timerCmd missing skip-ui: %q", c)
+	}
+	if !strings.Contains(c, "'adbgo: FIND ME'") {
+		t.Fatalf("timerCmd missing quoted message: %q", c)
 	}
 }
 
