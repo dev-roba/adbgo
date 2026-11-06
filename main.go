@@ -2052,7 +2052,7 @@ func pentestScanAllFlow(serial string) {
 	surfaces, err := adb.ScanAllSurfaces(serial, func(done, total int, pkg string) {
 		fmt.Printf("\r  scanning %d/%d: %-45s", done+1, total, pkg)
 	})
-	fmt.Println("\n")
+	fmt.Println()
 	if err != nil {
 		ui.PrintError(err.Error())
 		ui.Pause()

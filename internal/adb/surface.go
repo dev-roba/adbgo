@@ -61,7 +61,7 @@ var dangerousPermSet = func() map[string]bool {
 
 var resolverComponentRe = regexp.MustCompile(`(?m)^\s*[0-9a-f]{4,}\s+(\S+)\s+filter\b`)
 var providerComponentRe = regexp.MustCompile(`(?m)^\s*[0-9a-f]{4,}\s+(\S+/\S*)\s*$`)
-var sectionEndRe = regexp.MustCompile(`\n    [A-Z]`)
+	var sectionEndRe = regexp.MustCompile(`(?m)^ {0,2}[A-Z]`)
 
 // section returns the dumpsys output after a 4-space section header until
 // the next 4-space header.

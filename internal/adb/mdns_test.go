@@ -47,7 +47,7 @@ func TestParseMDNSResponseAndCombine(t *testing.T) {
 	m = append(m, 0, 0, 0x84, 0x00) // id, flags: response + authoritative
 	m = append(m, 0, 0)             // qdcount
 	m = append(m, 0, 3)             // ancount = 3
-	m = append(m, 0, 0, 0, 0, 0, 0) // nscount, arcount
+	m = append(m, 0, 0, 0, 0) // nscount, arcount
 
 	// Answer 1: SRV pixel._adb-tls-connect._tcp.local → android-1234.local:37459
 	nameOff := len(m)
