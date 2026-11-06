@@ -286,6 +286,7 @@ func showMainMenu(cfg *config.Config, session *auth.Session) {
 			huh.NewOption("👥 Multi-Device Mode", "multi"),
 			huh.NewOption("🔔 Notification Mirror (see phone notifications)", "notifications"),
 			huh.NewOption("📞 Find My Phone (max volume + alarm)", "findphone"),
+			huh.NewOption("💾 Backup & Restore (undo, safety net)", "backup"),
 			huh.NewOption("🛡️ Pentest Lab (fingerprint & attack surface)", "pentest"),
 		}
 
@@ -352,6 +353,9 @@ func showMainMenu(cfg *config.Config, session *auth.Session) {
 
 		case "findphone":
 			findPhoneFlow(session.Device.Serial)
+
+		case "backup":
+			backupCenterFlow(session.Device.Serial)
 
 		case "files":
 			showFileSystem(session)
@@ -1739,7 +1743,7 @@ func showDangerZone(session *auth.Session) {
 	case "root":
 		err = danger.FullRootShell(serial)
 	case "factory":
-		err = danger.FactoryReset(serial)
+		factoryResetFlow(serial)
 	case "cache":
 		err = danger.WipeCache(serial)
 	case "unlock":
@@ -3364,4 +3368,237 @@ func meshExecFlow() {
 		fmt.Println(strings.TrimSpace(out))
 		fmt.Println()
 	}
+}
+
+// backupCenterFlow is the Backup & Restore hub: save the phone, push a
+// backup back (undoes deletions and factory resets), or wipe with a
+// safety net.
+func backupCenterFlow(serial string) {
+	for {
+		var choice string
+		form := huh.NewForm(
+			huh.NewGroup(
+				huh.NewSelect[string]().
+					Title("💾 Backup & Restore").
+					Options(
+						huh.NewOption("Back up now (choose what to save)", "backup"),
+						huh.NewOption("Restore a backup (undo deletions / after a reset)", "restore"),
+						huh.NewOption("Factory reset (safety backup first)", "reset"),
+						huh.NewOption("List backups", "list"),
+						huh.NewOption("Back", "back"),
+					).
+					Value(&choice),
+			),
+		)
+		if err := form.Run(); err != nil || choice == "back" || choice == "" {
+			return
+		}
+		switch choice {
+		case "backup":
+			backupFlow(serial)
+		case "restore":
+			restoreFlow(serial)
+		case "reset":
+			factoryResetFlow(serial)
+		case "list":
+			listBackupsFlow(serial)
+		}
+	}
+}
+
+// backupFlow asks what to save and copies it off the phone into a
+// timestamped folder.
+func backupFlow(serial string) {
+	picked := []string{"contacts", "sms", "calls", "settings", "apps", "media"}
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewMultiSelect[string]().
+				Title("What should adbgo save? (space to toggle)").
+				Filterable(true).
+				Options(
+					huh.NewOption("Contacts (names, phone numbers, emails)", "contacts").Selected(true),
+					huh.NewOption("SMS messages", "sms").Selected(true),
+					huh.NewOption("Call log", "calls").Selected(true),
+					huh.NewOption("Settings (global / secure / system)", "settings").Selected(true),
+					huh.NewOption("App list (what was installed)", "apps").Selected(true),
+					huh.NewOption("Photos & videos (DCIM + Pictures — slow if big)", "media").Selected(true),
+				).
+				Value(&picked),
+		),
+	)
+	if err := form.Run(); err != nil || len(picked) == 0 {
+		return
+	}
+	opts, err := adb.ParseBackupChoices(picked)
+	if err != nil {
+		ui.PrintError(err.Error())
+		return
+	}
+	ui.PrintInfo("Backing up " + strings.Join(picked, ", ") + " from " + serial + "...")
+	res, err := adb.Backup(serial, adb.DefaultBackupRoot, opts)
+	if err != nil {
+		ui.PrintError(err.Error())
+		return
+	}
+	ui.PrintSuccess("💾 Saved: " + res.Summary())
+	ui.PrintInfo("Folder: " + res.Dir)
+	for _, w := range res.Warnings {
+		ui.PrintWarning(w)
+	}
+}
+
+// restoreFlow picks a backup and pushes it back. Items the phone already
+// has are skipped, so this both undoes deletions and rebuilds the phone
+// after a factory reset without duplicating anything.
+func restoreFlow(serial string) {
+	backups, err := adb.ListBackups(adb.DefaultBackupRoot, serial)
+	if err != nil {
+		ui.PrintError(err.Error())
+		return
+	}
+	if len(backups) == 0 {
+		ui.PrintWarning("No backups for this phone yet. Use 'Back up now' first.")
+		return
+	}
+	opts := make([]huh.Option[string], 0, len(backups))
+	for _, b := range backups {
+		opts = append(opts, huh.NewOption(adb.DescribeBackup(b), b))
+	}
+	var dir string
+	pick := huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Which backup?").
+				Options(opts...).
+				Value(&dir),
+		),
+	)
+	if err := pick.Run(); err != nil || dir == "" {
+		return
+	}
+	avail := adb.CategoriesIn(dir)
+	picked := []string{}
+	if avail.Contacts {
+		picked = append(picked, "contacts")
+	}
+	if avail.SMS {
+		picked = append(picked, "sms")
+	}
+	if avail.CallLog {
+		picked = append(picked, "calls")
+	}
+	if avail.Settings {
+		picked = append(picked, "settings")
+	}
+	if avail.Apps {
+		picked = append(picked, "apps")
+	}
+	if avail.Media {
+		picked = append(picked, "media")
+	}
+	if len(picked) == 0 {
+		ui.PrintWarning("That backup folder is empty.")
+		return
+	}
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewMultiSelect[string]().
+				Title("What should go back? (space to toggle)").
+				Filterable(true).
+				Options(
+					huh.NewOption("Contacts", "contacts").Selected(avail.Contacts),
+					huh.NewOption("SMS messages", "sms").Selected(avail.SMS),
+					huh.NewOption("Call log", "calls").Selected(avail.CallLog),
+					huh.NewOption("Settings", "settings").Selected(avail.Settings),
+					huh.NewOption("App list (see what is missing)", "apps").Selected(avail.Apps),
+					huh.NewOption("Photos & videos", "media").Selected(avail.Media),
+				).
+				Value(&picked),
+		),
+	)
+	if err := form.Run(); err != nil || len(picked) == 0 {
+		return
+	}
+	sel, err := adb.ParseBackupChoices(picked)
+	if err != nil {
+		ui.PrintError(err.Error())
+		return
+	}
+	ui.PrintInfo("Restoring from " + dir + " ...")
+	res, err := adb.Restore(serial, dir, sel)
+	if err != nil {
+		ui.PrintError(err.Error())
+		return
+	}
+	ui.PrintSuccess("♻️ " + res.RestoreSummary())
+	if len(res.MissingApps) > 0 {
+		ui.PrintInfo(fmt.Sprintf("%d apps are missing after the reset — reinstall them from the store, then sign in (app data needs root to restore):", len(res.MissingApps)))
+		for _, p := range res.MissingApps {
+			fmt.Println("  • " + p)
+		}
+	}
+	for _, w := range res.Warnings {
+		ui.PrintWarning(w)
+	}
+}
+
+// listBackupsFlow shows every saved backup for this phone.
+func listBackupsFlow(serial string) {
+	backups, err := adb.ListBackups(adb.DefaultBackupRoot, serial)
+	if err != nil {
+		ui.PrintError(err.Error())
+		return
+	}
+	if len(backups) == 0 {
+		ui.PrintWarning("No backups for this phone yet.")
+		return
+	}
+	for _, b := range backups {
+		fmt.Println("  " + filepath.Base(b) + "  —  " + adb.DescribeBackup(b))
+	}
+	ui.PrintInfo("Backups live in ./" + adb.DefaultBackupRoot + "/")
+}
+
+// factoryResetFlow wipes the phone with a safety net: first it saves a
+// full backup (so the phone can be rebuilt "like nothing happened"), then
+// it runs the double-confirmed factory reset, and finally it explains
+// how to restore afterwards.
+func factoryResetFlow(serial string) {
+	ui.PrintWarning("A factory reset erases EVERYTHING: apps, messages, photos, settings.")
+	var safe, media bool
+	ask := huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().Title("Make a safety backup first? (recommended — enables full restore)").Value(&safe),
+			huh.NewConfirm().Title("Include photos & videos in the safety backup? (slow if the library is big)").Value(&media),
+		),
+	)
+	if err := ask.Run(); err != nil {
+		return
+	}
+	if safe {
+		ui.PrintInfo("Safety backup running (this can take a while)...")
+		res, err := adb.Backup(serial, adb.DefaultBackupRoot, adb.AllBackupOptions(media))
+		if err != nil {
+			ui.PrintError("Safety backup failed: " + err.Error())
+			var anyway bool
+			cont := huh.NewForm(huh.NewGroup(
+				huh.NewConfirm().Title("Continue the factory reset WITHOUT a backup?").Value(&anyway),
+			))
+			if cerr := cont.Run(); cerr != nil || !anyway {
+				ui.PrintInfo("Cancelled. Fix the backup problem and try again.")
+				return
+			}
+		} else {
+			ui.PrintSuccess("💾 Safety backup: " + res.Summary())
+			ui.PrintInfo("Folder: " + res.Dir)
+			for _, w := range res.Warnings {
+				ui.PrintWarning(w)
+			}
+		}
+	}
+	if err := danger.FactoryReset(serial); err != nil {
+		ui.PrintError(err.Error())
+		return
+	}
+	ui.PrintInfo("After the phone reboots and is set up again: enable USB debugging, reconnect, then Main Menu → Backup & Restore → Restore a backup (or run: adbgo restore).")
 }

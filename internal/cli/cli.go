@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dev-roba/adbgo/internal/adb"
+	"github.com/dev-roba/adbgo/internal/danger"
 	"github.com/dev-roba/adbgo/internal/qr"
 	"github.com/dev-roba/adbgo/internal/relay"
 	"github.com/dev-roba/adbgo/internal/share"
@@ -45,6 +46,11 @@ func PrintHelp() {
 	fmt.Println("  fingerprint [-s serial]      Security fingerprint & risk verdict")
 	fmt.Println("  notifications [-s serial] [-json]  Mirror phone notifications")
 	fmt.Println("  findmyphone [-s serial]       Timer + alarm + max volume + vibration")
+	fmt.Println("  backup [what] [-s serial]     Save phone data (contacts, sms, calls, settings, apps, media)")
+	fmt.Println("      what: contacts|sms|calls|settings|apps|media|everything (default: all but media)")
+	fmt.Println("  restore [what] [-s serial] [-dir D]  Push a backup back (latest by default, no duplicates)")
+	fmt.Println("  backups [-s serial]           List saved backups for the phone")
+	fmt.Println("  factoryreset [-s serial] [-media=false]  Safety backup, then wipe the phone")
 	fmt.Println("  triage <pkg> [-s serial] [-json]  Pull APK & static analysis")
 	fmt.Println("  bruteforce [flags]           Lockscreen credential tester (pin/password/pattern)")
 	fmt.Println("      -type pin|password|pattern -min N -max N -mask 08?? -wordlist file")
@@ -484,6 +490,120 @@ func HandleCLI(version string) bool {
 		} else {
 			ui.PrintInfo("No clock app answered — listen for media and look for the lit screen.")
 		}
+		return true
+
+	case "backup":
+		fs := flag.NewFlagSet("backup", flag.ExitOnError)
+		serial := fs.String("s", "", "Device serial")
+		fs.Parse(args)
+		target := getOrPickDevice(*serial)
+		opts := adb.AllBackupOptions(false)
+		if words := fs.Args(); len(words) > 0 {
+			parsed, perr := adb.ParseBackupChoices(words)
+			if perr != nil {
+				ui.PrintError(perr.Error())
+				os.Exit(1)
+			}
+			opts = parsed
+		} else {
+			ui.PrintInfo("Backing up contacts, SMS, call log, settings, app list. Add 'media' or 'everything' for photos & videos.")
+		}
+		res, err := adb.Backup(target, adb.DefaultBackupRoot, opts)
+		if err != nil {
+			ui.PrintError(err.Error())
+			os.Exit(1)
+		}
+		ui.PrintSuccess("💾 Saved: " + res.Summary())
+		fmt.Println("  folder: " + res.Dir)
+		for _, w := range res.Warnings {
+			ui.PrintWarning("  " + w)
+		}
+		return true
+
+	case "restore":
+		fs := flag.NewFlagSet("restore", flag.ExitOnError)
+		serial := fs.String("s", "", "Device serial")
+		dirFlag := fs.String("dir", "", "Backup folder (default: latest for this phone)")
+		fs.Parse(args)
+		target := getOrPickDevice(*serial)
+		dir := *dirFlag
+		if dir == "" {
+			latest, lerr := adb.LatestBackup(adb.DefaultBackupRoot, target)
+			if lerr != nil {
+				ui.PrintError(lerr.Error())
+				os.Exit(1)
+			}
+			dir = latest
+		}
+		opts := adb.CategoriesIn(dir)
+		if words := fs.Args(); len(words) > 0 {
+			parsed, perr := adb.ParseBackupChoices(words)
+			if perr != nil {
+				ui.PrintError(perr.Error())
+				os.Exit(1)
+			}
+			opts = parsed
+		}
+		ui.PrintInfo("Restoring from " + dir + " ...")
+		res, err := adb.Restore(target, dir, opts)
+		if err != nil {
+			ui.PrintError(err.Error())
+			os.Exit(1)
+		}
+		ui.PrintSuccess("♻️ " + res.RestoreSummary())
+		if len(res.MissingApps) > 0 {
+			ui.PrintInfo(fmt.Sprintf("%d apps missing after the reset — reinstall them, then sign in (app data needs root to restore):", len(res.MissingApps)))
+			for _, p := range res.MissingApps {
+				fmt.Println("  • " + p)
+			}
+		}
+		for _, w := range res.Warnings {
+			ui.PrintWarning("  " + w)
+		}
+		return true
+
+	case "backups":
+		fs := flag.NewFlagSet("backups", flag.ExitOnError)
+		serial := fs.String("s", "", "Device serial")
+		fs.Parse(args)
+		target := getOrPickDevice(*serial)
+		list, err := adb.ListBackups(adb.DefaultBackupRoot, target)
+		if err != nil {
+			ui.PrintError(err.Error())
+			os.Exit(1)
+		}
+		if len(list) == 0 {
+			ui.PrintWarning("No backups for " + target + " yet. Run: adbgo backup")
+			return true
+		}
+		for _, b := range list {
+			fmt.Println("  " + filepath.Base(b) + "  —  " + adb.DescribeBackup(b))
+		}
+		ui.PrintInfo("Restore with: adbgo restore")
+		return true
+
+	case "factoryreset":
+		fs := flag.NewFlagSet("factoryreset", flag.ExitOnError)
+		serial := fs.String("s", "", "Device serial")
+		media := fs.Bool("media", true, "Include photos & videos in the safety backup")
+		fs.Parse(args)
+		target := getOrPickDevice(*serial)
+		ui.PrintWarning("Safety backup first, wipe after.")
+		res, err := adb.Backup(target, adb.DefaultBackupRoot, adb.AllBackupOptions(*media))
+		if err != nil {
+			ui.PrintError("Safety backup failed (aborting — no wipe): " + err.Error())
+			os.Exit(1)
+		}
+		ui.PrintSuccess("💾 Safety backup: " + res.Summary())
+		fmt.Println("  folder: " + res.Dir)
+		for _, w := range res.Warnings {
+			ui.PrintWarning("  " + w)
+		}
+		if err := danger.FactoryReset(target); err != nil {
+			ui.PrintError(err.Error())
+			os.Exit(1)
+		}
+		ui.PrintInfo("After the wipe and setup: reconnect the phone and run 'adbgo restore' to put everything back.")
 		return true
 
 	case "triage":
