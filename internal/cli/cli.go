@@ -44,7 +44,7 @@ func PrintHelp() {
 	fmt.Println("  apps [-json]                   List installed third-party packages")
 	fmt.Println("  fingerprint [-s serial]      Security fingerprint & risk verdict")
 	fmt.Println("  notifications [-s serial] [-json]  Mirror phone notifications")
-	fmt.Println("  findmyphone [-s serial]       Max volume + alarm to locate the phone")
+	fmt.Println("  findmyphone [-s serial]       Timer + alarm + max volume + vibration")
 	fmt.Println("  triage <pkg> [-s serial] [-json]  Pull APK & static analysis")
 	fmt.Println("  bruteforce [flags]           Lockscreen credential tester (pin/password/pattern)")
 	fmt.Println("      -type pin|password|pattern -min N -max N -mask 08?? -wordlist file")
@@ -470,12 +470,20 @@ func HandleCLI(version string) bool {
 		serial := fs.String("s", "", "Device serial")
 		fs.Parse(args)
 		target := getOrPickDevice(*serial)
-		ui.PrintInfo("Ringing " + target + "...")
-		if err := adb.FindMyPhone(target); err != nil {
-			ui.PrintWarning(err.Error())
+		ui.PrintInfo("Making " + target + " loud...")
+		summary, err := adb.FindMyPhone(target)
+		if err != nil {
+			ui.PrintError(err.Error())
 			return true
 		}
-		ui.PrintSuccess("🔊 Phone should be ringing!")
+		ui.PrintSuccess("🔊 " + summary)
+		if strings.Contains(summary, "timer ringing") {
+			ui.PrintInfo("It fires in ~10 seconds, even in silent mode — swipe the timer away on the phone when found.")
+		} else if strings.Contains(summary, "alarm scheduled") {
+			ui.PrintInfo("The alarm will ring even in silent mode — swipe it away on the phone when found.")
+		} else {
+			ui.PrintInfo("No clock app answered — listen for media and look for the lit screen.")
+		}
 		return true
 
 	case "triage":
