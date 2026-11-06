@@ -114,7 +114,7 @@ func init() {
 		"GitHub token|gh[pousr]_[0-9A-Za-z]{20,}",
 		"Slack token|xox[baprs]-[0-9A-Za-z-]{10,}",
 		"Telegram bot token|[0-9]{8,10}:AA[0-9A-Za-z_-]{30,}",
-		"JWT|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
+		`JWT|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`,
 		"Private key|-----BEGIN [A-Z ]*PRIVATE KEY",
 	} {
 		parts := strings.SplitN(e, "|", 2)

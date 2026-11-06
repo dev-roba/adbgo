@@ -336,7 +336,7 @@ func ConnectReliable(addr string, attempts int) (string, error) {
 	}
 	var last string
 	for i := 0; i < attempts; i++ {
-		_, err := ConnectDirect(addr)
+		err := ConnectDirect(addr)
 		if err == nil && IsConnected(addr) {
 			return addr, nil
 		}
