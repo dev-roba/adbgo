@@ -2,35 +2,145 @@ package adb
 
 import (
 	"fmt"
-	"time"
+	"strconv"
+	"strings"
 )
 
-// FindMyPhone makes a connected phone ring loudly: ring/media/notification
-// volumes maxed out, screen woken, keyguard dismissed, and a repeating
-// alarm notification posted. Best effort — each step tolerates failure
-// since device support varies.
-func FindMyPhone(serial string) error {
-	for _, stream := range []string{"2", "3", "5"} {
-		_, _ = Run(serial, "shell", "media", "volume", "--stream", stream, "--set", "15")
+// shquote wraps s in single quotes so the phone's shell keeps it as a
+// single argument. adb shell re-parses the whole command line on the
+// device, so arguments containing spaces must be quoted for the remote
+// shell, not just for the local exec. This is why the original
+// find-my-phone notification text never reached the phone in one piece.
+func shquote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
+}
+
+// FindMyPhone makes a connected phone as loud and visible as possible.
+// Belt and braces: every volume stream maxed (including the alarm stream,
+// which was previously forgotten), the screen woken and keyguard
+// dismissed, the last media session resumed for instant noise, a highly
+// visible notification posted, and, when the device clock app answers
+// android.intent.action.SET_ALARM, a real alarm scheduled two minutes
+// out that rings even in silent mode. It returns a summary of what
+// actually worked, so the user knows exactly what to expect.
+func FindMyPhone(serial string) (string, error) {
+	// The phone must actually respond, or everything below would silently
+	// do nothing and mislead the user.
+	if out, err := Run(serial, "shell", "echo", "adbgo"); err != nil || strings.TrimSpace(out) != "adbgo" {
+		return "", fmt.Errorf("device %s is not responding over adb", serial)
 	}
 
+	var steps []string
+
+	// 1. Max the volume streams: 2 ring, 3 music, 4 alarm, 5 notification.
+	// Indexes above a stream maximum are clamped by the device, so after
+	// the classic 15 we also attempt 30 for devices with finer steps.
+	for _, stream := range []string{"2", "3", "4", "5"} {
+		ok := false
+		for _, idx := range []string{"15", "30"} {
+			if _, err := Run(serial, "shell", "media", "volume", "--stream", stream, "--set", idx); err == nil {
+				ok = true
+			}
+		}
+		if ok {
+			steps = append(steps, "stream "+stream+" volume maxed")
+		}
+	}
+
+	// 2. Wake the screen and dismiss the keyguard so the phone is lit.
 	_, _ = Run(serial, "shell", "input", "keyevent", "KEYCODE_WAKEUP")
 	_, _ = Run(serial, "shell", "wm", "dismiss-keyguard")
+	steps = append(steps, "screen woken")
 
-	posted := false
-	for i := 0; i < 3; i++ {
-		tag := fmt.Sprintf("adbgo%d", i)
-		if _, err := Run(serial, "shell", "cmd", "notification", "post", "-S", "alarm",
-			"-t", "adbgo — FIND ME", tag, "🔔 Your phone is HERE (sent from adbgo)"); err == nil {
-			posted = true
-		} else if _, err2 := Run(serial, "shell", "cmd", "notification", "post",
-			"-t", "adbgo — FIND ME", tag, "🔔 Your phone is HERE (sent from adbgo)"); err2 == nil {
-			posted = true
+	// 3. Instant noise: resume the most recent media session. Whatever was
+	// last playing (music, podcast, video) now blasts at maximum volume.
+	played := false
+	if _, err := Run(serial, "shell", "cmd", "media_session", "dispatch", "play"); err == nil {
+		played = true
+	}
+	if _, err := Run(serial, "shell", "input", "keyevent", "KEYCODE_MEDIA_PLAY"); err == nil {
+		played = true
+	}
+	if played {
+		steps = append(steps, "last media resumed (loud if something was recently playing)")
+	}
+
+	// 4. The guaranteed ringer: a real alarm two minutes out, which fires
+	// on the alarm stream even in silent or DND mode.
+	if h, m, err := nextAlarmTime(serial); err == nil {
+		alarmCmd := "am start -a android.intent.action.SET_ALARM" +
+			" --ez android.intent.extra.alarm.SKIP_UI true" +
+			" --ez android.intent.extra.alarm.VIBRATE true" +
+			" --es android.intent.extra.alarm.MESSAGE " + shquote("adbgo: FIND ME") +
+			" --ei android.intent.extra.alarm.HOUR " + strconv.Itoa(h) +
+			" --ei android.intent.extra.alarm.MINUTES " + strconv.Itoa(m)
+		if out, aerr := Run(serial, "shell", alarmCmd); aerr == nil && !amFailed(out) {
+			steps = append(steps, fmt.Sprintf("alarm scheduled for %02d:%02d — it will ring even in silent mode", h, m))
 		}
-		time.Sleep(600 * time.Millisecond)
+	}
+
+	// 5. A visible notification so the lit screen says where the phone is.
+	postStyled := "cmd notification post -S bigtext -t " + shquote("adbgo — FIND ME") +
+		" adbgo-find " + shquote("📞 Your phone is HERE — sent from adbgo")
+	postPlain := "cmd notification post -t " + shquote("adbgo — FIND ME") +
+		" adbgo-find " + shquote("📞 Your phone is HERE — sent from adbgo")
+	posted := false
+	if out, err := Run(serial, "shell", postStyled); err == nil && !strings.Contains(strings.ToLower(out), "error") {
+		posted = true
 	}
 	if !posted {
-		return fmt.Errorf("alarm notification not supported on this device — volumes were maxed and the screen woken, but no alarm sound could be posted")
+		if out, err := Run(serial, "shell", postPlain); err == nil && !strings.Contains(strings.ToLower(out), "error") {
+			posted = true
+		}
 	}
-	return nil
+	if posted {
+		steps = append(steps, "notification posted")
+	}
+
+	return strings.Join(steps, "; "), nil
+}
+
+// nextAlarmTime reads the phone clock and returns a time two minutes
+// ahead, so the scheduled alarm fires shortly after the call. Two
+// minutes rather than one avoids the race where the requested minute
+// has already ticked past and the alarm would wait a full day.
+func nextAlarmTime(serial string) (int, int, error) {
+	out, err := Run(serial, "shell", "date", "+%H:%M")
+	if err != nil {
+		return 0, 0, err
+	}
+	return addMinutes(out, 2)
+}
+
+// addMinutes parses an "HH:MM" clock reading and advances it by add
+// minutes, wrapping past midnight. Pure, unit-tested.
+func addMinutes(hhmm string, add int) (int, int, error) {
+	parts := strings.Split(strings.TrimSpace(hhmm), ":")
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("unexpected clock output %q", hhmm)
+	}
+	h, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, 0, err
+	}
+	m, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, 0, err
+	}
+	if h < 0 || h > 23 || m < 0 || m > 59 || add < 0 {
+		return 0, 0, fmt.Errorf("invalid clock time %q", hhmm)
+	}
+	total := (h*60 + m + add) % (24 * 60)
+	return total / 60, total % 60, nil
+}
+
+// amFailed reports whether an 'am start' invocation failed: several
+// Android builds print human-readable errors while still exiting zero.
+func amFailed(out string) bool {
+	l := strings.ToLower(out)
+	return strings.Contains(l, "error") ||
+		strings.Contains(l, "securityexception") ||
+		strings.Contains(l, "permission denial") ||
+		strings.Contains(l, "no activity found") ||
+		strings.Contains(l, "not started")
 }

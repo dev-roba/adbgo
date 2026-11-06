@@ -2716,19 +2716,25 @@ func notificationsFlow(serial string) {
 	}
 }
 
-// findPhoneFlow rings the phone at maximum volume to locate it.
+// findPhoneFlow makes the phone loud and visible to locate it.
 func findPhoneFlow(serial string) {
 	var sure bool
 	if err := huh.NewForm(huh.NewGroup(
-		huh.NewConfirm().Title("Ring this phone at maximum volume?").Value(&sure),
+		huh.NewConfirm().Title("Make this phone loud (max volume + alarm)?").Value(&sure),
 	)).Run(); err != nil || !sure {
 		return
 	}
-	ui.PrintInfo("Making the phone ring...")
-	if err := adb.FindMyPhone(serial); err != nil {
-		ui.PrintWarning(err.Error())
+	ui.PrintInfo("Making the phone loud...")
+	summary, err := adb.FindMyPhone(serial)
+	if err != nil {
+		ui.PrintError(err.Error())
+		return
+	}
+	ui.PrintSuccess("🔊 " + summary)
+	if strings.Contains(summary, "alarm scheduled") {
+		ui.PrintInfo("It will ring even in silent mode — swipe the alarm away on the phone when found.")
 	} else {
-		ui.PrintSuccess("🔊 Phone should be ringing — listen for the alarm / look for the screen!")
+		ui.PrintInfo("No clock app answered the alarm request — listen for media and look for the lit screen.")
 	}
 }
 
