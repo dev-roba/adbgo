@@ -1265,7 +1265,7 @@ func wirelessFlow(serial string) {
 					huh.NewOption("Scan local network for mDNS wireless devices", "scan"),
 					huh.NewOption("📲 Smart connect (USB → mDNS → saved → LAN sweep)", "smart"),
 					huh.NewOption("🔳 Pair with QR code (phone scans, zero typing)", "pairqr"),
-					huh.NewOption("📡 LAN recon (sweep for phones with port 5555 open)", "recon"),
+					huh.NewOption("📡 LAN center (sweep, deep scan, mDNS, doctor, known phones)", "recon"),
 					huh.NewOption("🤝 Device radar (auto-connect when a phone joins Wi-Fi)", "radar"),
 					huh.NewOption("👀 Watchdog (monitor, auto-reconnect, desktop alerts)", "watch"),
 					huh.NewOption("🌐 Web panel (control the phone from any browser)", "web"),
@@ -1378,7 +1378,7 @@ func wirelessFlow(serial string) {
 		pairQRFlow()
 
 	case "recon":
-		lanReconFlow()
+		lanCenterFlow()
 
 	case "radar":
 		radarFlow()
@@ -2781,10 +2781,48 @@ func pairQRFlow() {
 	ui.PrintInfo("or run Smart connect — this phone is remembered from now on.")
 }
 
-// lanReconFlow sweeps the local network for phones with adbd exposed.
-func lanReconFlow() {
+// lanCenterFlow is the LAN connectivity hub.
+func lanCenterFlow() {
+	for {
+		var choice string
+		form := huh.NewForm(huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("📡 LAN center").
+				Options(
+					huh.NewOption("Quick sweep — find adbd on port 5555", "sweep"),
+					huh.NewOption("Deep scan a phone — hunt adbd on the random wireless ports", "deep"),
+					huh.NewOption("mDNS discovery — adb backend + raw multicast (no avahi needed)", "mdns"),
+					huh.NewOption("Connection doctor — diagnose why an address won't connect", "doctor"),
+					huh.NewOption("My networks — interfaces, subnets, gateway, per-subnet sweep", "nets"),
+					huh.NewOption("Known phones — saved endpoints: connect or forget", "known"),
+					huh.NewOption("Back", "back"),
+				).
+				Value(&choice),
+		))
+		if err := form.Run(); err != nil || choice == "back" || choice == "" {
+			return
+		}
+		switch choice {
+		case "sweep":
+			quickSweepFlow()
+		case "deep":
+			deepScanFlow()
+		case "mdns":
+			rawMDNSFlow()
+		case "doctor":
+			lanDoctorFlow()
+		case "nets":
+			lanNetworksFlow()
+		case "known":
+			knownPhonesFlow()
+		}
+	}
+}
+
+// quickSweepFlow sweeps every local subnet for adbd on port 5555.
+func quickSweepFlow() {
 	ui.PrintWarning("Authorized use only — scan networks you own.")
-	ui.PrintInfo("Sweeping local subnets for port 5555 (takes ~10s)...")
+	ui.PrintInfo("Sweeping local subnets for port 5555 (adaptive, a few seconds)...")
 	targets, err := adb.ScanLANPorts(5555, func(done, total int) {
 		fmt.Printf("\r  probing %d/%d hosts...", done, total)
 	})
@@ -2794,30 +2832,263 @@ func lanReconFlow() {
 		return
 	}
 	if len(targets) == 0 {
-		ui.PrintWarning("No devices with port 5555 open. Enable wireless debugging on the phone first.")
+		ui.PrintWarning("Nothing on 5555. Android 11+ wireless debugging uses RANDOM ports —")
+		ui.PrintWarning("use 'mDNS discovery' or 'Deep scan a phone' instead.")
 		return
 	}
 	ui.PrintSuccess(fmt.Sprintf("Found %d target(s):", len(targets)))
+	var probes []adb.ADBDProbe
 	for _, t := range targets {
-		fmt.Println("  • " + t)
+		p := adb.ProbeTarget(t)
+		probes = append(probes, p)
+		fmt.Printf("  • %-22s %-12s %s\n", t, p.State, p.Model)
+		if p.Note != "" && p.State != "device" {
+			ui.PrintInfo("    " + p.Note)
+		}
 	}
-	opts := make([]huh.Option[string], 0, len(targets)+1)
+	opts := make([]huh.Option[string], 0, len(probes)+2)
+	opts = append(opts, huh.NewOption("Connect to ALL of them", "all"))
 	opts = append(opts, huh.NewOption("Skip — don't connect", ""))
-	for _, t := range targets {
-		opts = append(opts, huh.NewOption(t, t))
+	for _, p := range probes {
+		label := p.Addr
+		if p.Model != "" {
+			label = p.Addr + " (" + p.Model + ")"
+		}
+		opts = append(opts, huh.NewOption(label, p.Addr))
 	}
 	var sel string
-	form := huh.NewForm(huh.NewGroup(
+	selForm := huh.NewForm(huh.NewGroup(
 		huh.NewSelect[string]().Title("Connect to which?").Options(opts...).Value(&sel),
 	))
-	if err := form.Run(); err != nil || sel == "" {
+	if err := selForm.Run(); err != nil || sel == "" {
 		return
 	}
-	if err := adb.ConnectDirect(sel); err != nil {
-		ui.PrintError(err.Error())
+	if sel == "all" {
+		for _, p := range probes {
+			if serial, cerr := adb.ConnectReliable(p.Addr, 2); cerr == nil {
+				ui.PrintSuccess("Connected: " + serial)
+			} else {
+				ui.PrintError(cerr.Error())
+			}
+		}
+		return
+	}
+	if _, cerr := adb.ConnectReliable(sel, 3); cerr != nil {
+		ui.PrintError(cerr.Error())
 		return
 	}
 	ui.PrintSuccess("Connected to " + sel)
+}
+
+// deepScanFlow hunts adbd on one phone across the wireless-debugging
+// port range — the thing to try when 5555 is closed but the phone is
+// definitely on this network.
+func deepScanFlow() {
+	fmt.Print("Phone IP (e.g. 192.168.1.42): ")
+	ip := ui.ReadLine()
+	if ip == "" {
+		return
+	}
+	ui.PrintWarning("Authorized use only — scan devices you own.")
+	ui.PrintInfo("Deep-scanning " + ip + " for adbd (5555 + ports 30000-65535, ~2-30s)...")
+	ports := adb.DeepScanHost(ip, 350*time.Millisecond, 512, func(open, done, total int) {
+		fmt.Printf("\r  %d/%d ports probed, %d open   ", done, total, open)
+	}, nil)
+	fmt.Println()
+	if len(ports) == 0 {
+		ui.PrintWarning("No adbd port found on " + ip + ". Is the phone on this network?")
+		ui.PrintWarning("Wi-Fi power saving can hide the ports — wake the phone and retry.")
+		return
+	}
+	ui.PrintSuccess(fmt.Sprintf("Open port(s): %v", ports))
+	var ready []string
+	for _, p := range ports {
+		addr := ip + ":" + strconv.Itoa(p)
+		probe := adb.ProbeTarget(addr)
+		fmt.Printf("  • %-22s %-12s %s\n", addr, probe.State, probe.Model)
+		if probe.Note != "" && probe.State != "device" {
+			ui.PrintInfo("    " + probe.Note)
+		}
+		if probe.State == "device" {
+			ready = append(ready, addr)
+		}
+	}
+	if len(ready) == 0 {
+		ui.PrintInfo("Tip: a port showing 'offline' means the phone needs pairing first (adbgo pairqr).")
+		return
+	}
+	opts := make([]huh.Option[string], 0, len(ready)+1)
+	opts = append(opts, huh.NewOption("Skip — don't connect", ""))
+	for _, addr := range ready {
+		opts = append(opts, huh.NewOption(addr, addr))
+	}
+	var sel string
+	selForm := huh.NewForm(huh.NewGroup(
+		huh.NewSelect[string]().Title("Connect to which?").Options(opts...).Value(&sel),
+	))
+	if err := selForm.Run(); err != nil || sel == "" {
+		return
+	}
+	if _, cerr := adb.ConnectReliable(sel, 3); cerr != nil {
+		ui.PrintError(cerr.Error())
+		return
+	}
+	ui.PrintSuccess("Connected to " + sel)
+}
+
+// rawMDNSFlow discovers phones via both the adb backend and adbgo's own
+// raw multicast query, then offers to connect.
+func rawMDNSFlow() {
+	backend := adb.DiscoverMDNSSafe()
+	ui.PrintInfo("adb mDNS backend:")
+	if len(backend) == 0 {
+		fmt.Println("  (nothing — its backend may be unavailable on this distro)")
+	}
+	for _, t := range backend {
+		fmt.Println("  • " + t.Instance + " → " + t.Addr)
+	}
+	ui.PrintInfo("adbgo raw multicast (~3s)...")
+	raw := adb.QueryMDNSService(adb.MDNSConnectService, 3*time.Second)
+	if len(raw) == 0 {
+		fmt.Println("  (nothing)")
+	}
+	for _, t := range raw {
+		fmt.Println("  • " + t.Instance + " → " + t.Addr)
+	}
+	merged := adb.MergeMDNSTargets(backend, raw)
+	if len(merged) == 0 {
+		ui.PrintWarning("No wireless devices found. Enable Wireless debugging on the phone,")
+		ui.PrintWarning("then pair with 'Pair with QR code' and try again.")
+		return
+	}
+	ui.PrintSuccess(fmt.Sprintf("%d wireless device(s) reachable", len(merged)))
+	opts := make([]huh.Option[string], 0, len(merged)+1)
+	opts = append(opts, huh.NewOption("Skip — don't connect", ""))
+	for _, t := range merged {
+		opts = append(opts, huh.NewOption(t.Instance+" → "+t.Addr, t.Addr))
+	}
+	var sel string
+	selForm := huh.NewForm(huh.NewGroup(
+		huh.NewSelect[string]().Title("Connect to which?").Options(opts...).Value(&sel),
+	))
+	if err := selForm.Run(); err != nil || sel == "" {
+		return
+	}
+	if _, cerr := adb.ConnectReliable(sel, 3); cerr != nil {
+		ui.PrintError(cerr.Error())
+		return
+	}
+	ui.PrintSuccess("Connected to " + sel)
+}
+
+// lanDoctorFlow diagnoses a LAN target and explains what to do next.
+func lanDoctorFlow() {
+	fmt.Print("Target (ip:port, bare IP = 5555): ")
+	addr := ui.ReadLine()
+	if addr == "" {
+		return
+	}
+	ui.PrintInfo("Running the connection doctor on " + addr + "...")
+	fmt.Println()
+	for _, line := range adb.DiagnoseTarget(addr) {
+		fmt.Println("  " + line)
+	}
+}
+
+// lanNetworksFlow shows interfaces, subnets and the gateway, and can
+// sweep any single subnet.
+func lanNetworksFlow() {
+	nets := adb.DiscoverLANNetworks(true)
+	fmt.Println()
+	fmt.Printf("  %-12s %-19s %s\n", "INTERFACE", "SUBNET", "SOURCE")
+	for _, n := range nets {
+		fmt.Printf("  %-12s %-19s %s\n", n.Iface, n.CIDR, n.Source)
+	}
+	if gw := adb.DefaultGateway(); gw != "" {
+		fmt.Println("  default gateway: " + gw)
+	}
+	opts := make([]huh.Option[string], 0, len(nets)+1)
+	opts = append(opts, huh.NewOption("Skip — don't sweep", ""))
+	for _, n := range nets {
+		hosts, _ := adb.CIDRHosts(n.CIDR, 1024)
+		opts = append(opts, huh.NewOption("Sweep "+n.CIDR+" ("+strconv.Itoa(len(hosts))+" hosts)", n.CIDR))
+	}
+	var sel string
+	selForm := huh.NewForm(huh.NewGroup(
+		huh.NewSelect[string]().Title("Sweep one subnet for adbd (5555)?").Options(opts...).Value(&sel),
+	))
+	if err := selForm.Run(); err != nil || sel == "" {
+		return
+	}
+	hosts, err := adb.CIDRHosts(sel, 1024)
+	if err != nil {
+		ui.PrintError(err.Error())
+		return
+	}
+	ui.PrintWarning("Authorized use only — scan networks you own.")
+	ui.PrintInfo(fmt.Sprintf("Sweeping %s (%d hosts)...", sel, len(hosts)))
+	found := adb.SweepPort(hosts, 5555, 400*time.Millisecond, 256, func(open, done, total int) {
+		fmt.Printf("\r  %d/%d probed, %d open   ", done, total, open)
+	}, nil)
+	fmt.Println()
+	if len(found) == 0 {
+		ui.PrintWarning("No adbd on 5555 in " + sel)
+		return
+	}
+	for _, h := range found {
+		addr := h + ":5555"
+		p := adb.ProbeTarget(addr)
+		fmt.Printf("  • %-22s %-12s %s\n", addr, p.State, p.Model)
+		if p.Note != "" && p.State != "device" {
+			ui.PrintInfo("    " + p.Note)
+		}
+	}
+}
+
+// knownPhonesFlow manages the saved LAN endpoints.
+func knownPhonesFlow() {
+	endpoints := adb.KnownEndpoints()
+	if len(endpoints) == 0 {
+		ui.PrintWarning("No known phones yet. Smart connect, QR pairing and radar learn addresses automatically.")
+		return
+	}
+	fmt.Println()
+	fmt.Printf("  %-16s %-22s %-14s %s\n", "NAME", "ADDR", "MODEL", "LAST SEEN")
+	for _, e := range endpoints {
+		fmt.Printf("  %-16s %-22s %-14s %s\n", e.Name, e.Addr, e.Model, e.When)
+	}
+	opts := make([]huh.Option[string], 0, len(endpoints)*2+1)
+	opts = append(opts, huh.NewOption("Back", ""))
+	for _, e := range endpoints {
+		opts = append(opts, huh.NewOption("Connect "+e.Name+" ("+e.Addr+")", "connect:"+e.Addr))
+	}
+	for _, e := range endpoints {
+		opts = append(opts, huh.NewOption("Forget "+e.Name, "forget:"+e.Addr))
+	}
+	var sel string
+	selForm := huh.NewForm(huh.NewGroup(
+		huh.NewSelect[string]().Title("Known phones").Options(opts...).Value(&sel),
+	))
+	if err := selForm.Run(); err != nil || sel == "" {
+		return
+	}
+	if strings.HasPrefix(sel, "connect:") {
+		addr := strings.TrimPrefix(sel, "connect:")
+		if _, cerr := adb.ConnectReliable(addr, 2); cerr != nil {
+			ui.PrintError(cerr.Error())
+			return
+		}
+		ui.PrintSuccess("Connected to " + addr)
+		return
+	}
+	if strings.HasPrefix(sel, "forget:") {
+		addr := strings.TrimPrefix(sel, "forget:")
+		if adb.ForgetEndpoint(addr) {
+			ui.PrintSuccess("Forgot " + addr)
+		} else {
+			ui.PrintWarning("No saved endpoint for " + addr)
+		}
+	}
 }
 
 // radarFlow auto-connects phones the moment they join the network.

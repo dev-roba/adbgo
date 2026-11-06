@@ -81,7 +81,7 @@ func Watchdog(stop <-chan struct{}, target string, onEvent func(event, msg strin
 func Radar(stop <-chan struct{}, onEvent func(msg string)) {
 	seen := map[string]bool{}
 	for {
-		targets, _ := DiscoverMDNSDetailed()
+		targets := DiscoverMDNSAll()
 		for _, t := range targets {
 			if seen[t.Addr] || IsConnected(t.Addr) {
 				continue

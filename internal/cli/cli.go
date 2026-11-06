@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -52,7 +53,13 @@ func PrintHelp() {
 	fmt.Println("  pairqr                      QR pairing: the phone scans, adbgo pairs")
 	fmt.Println("  watch [-s serial|target]    Watchdog: auto-reconnect + desktop alerts")
 	fmt.Println("  radar                       Auto-connect phones as they join Wi-Fi")
-	fmt.Println("  recon                       Sweep your LAN for port 5555 (own network)")
+	fmt.Println("  lan sweep                  Sweep all local subnets for adbd on 5555")
+	fmt.Println("  lan deep <ip>              Hunt adbd on a phone's random wireless ports")
+	fmt.Println("  lan mdns                   Discover phones via adb + raw mDNS (no avahi)")
+	fmt.Println("  lan doctor <addr>          Diagnose why an address won't connect")
+	fmt.Println("  lan nets                   List interfaces, subnets, gateway")
+	fmt.Println("  lan known [connect|forget <addr>]  Saved phones")
+	fmt.Println("  recon                      Same as: lan sweep (own network only)")
 	fmt.Println("  web [-s serial] [-wan]      Browser control panel (tap, type, keys)")
 	fmt.Println("  tunnel up|down|list|gen-frp  SSH reverse tunnel manager")
 	fmt.Println("  relay serve|expose|connect  Token-gated relay between two machines")
@@ -518,7 +525,16 @@ func HandleCLI(version string) bool {
 		if len(args) > 0 {
 			name = args[0]
 		}
-		ui.PrintInfo("Connect chain: USB → mDNS → saved → LAN sweep...")
+		if strings.Contains(name, ":") {
+			ui.PrintInfo("Direct connect: " + name)
+			if _, err := adb.ConnectReliable(name, 3); err != nil {
+				ui.PrintError(err.Error())
+				os.Exit(1)
+			}
+			ui.PrintSuccess("Connected to " + name)
+			return true
+		}
+		ui.PrintInfo("Connect chain: USB → mDNS (incl. raw) → saved → LAN sweep...")
 		serial, how, err := adb.SmartConnect(name, func(msg string) { ui.PrintInfo(msg) })
 		if err != nil {
 			ui.PrintError(err.Error())
@@ -572,25 +588,12 @@ func HandleCLI(version string) bool {
 		adb.Radar(nil, func(msg string) { ui.PrintSuccess(msg) })
 		return true
 
+	case "lan":
+		handleLanCLI(args)
+		return true
+
 	case "recon":
-		ui.PrintWarning("Authorized use only — scan networks you own.")
-		ui.PrintInfo("Sweeping local subnets for port 5555 (takes ~10s)...")
-		targets, err := adb.ScanLANPorts(5555, func(done, total int) {
-			fmt.Printf("\r  probing %d/%d hosts...", done, total)
-		})
-		fmt.Println()
-		if err != nil {
-			ui.PrintError(err.Error())
-			os.Exit(1)
-		}
-		if len(targets) == 0 {
-			ui.PrintWarning("No devices with port 5555 open.")
-			return true
-		}
-		for _, t := range targets {
-			fmt.Println("  • " + t)
-		}
-		ui.PrintInfo("Connect one with: adbgo connect <ip:5555>")
+		handleLanCLI(append([]string{"sweep"}, args...))
 		return true
 
 	case "web":
@@ -1012,6 +1015,142 @@ func handleRelayCLI(args []string) {
 
 	default:
 		ui.PrintError("Unknown relay subcommand: " + args[0])
+		os.Exit(1)
+	}
+}
+
+// handleLanCLI implements the `adbgo lan` hub.
+func handleLanCLI(args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage:")
+		fmt.Println("  adbgo lan sweep                 Sweep local subnets for adbd on 5555")
+		fmt.Println("  adbgo lan deep <ip>             Hunt adbd on a phone's random ports")
+		fmt.Println("  adbgo lan mdns                  adb backend + raw mDNS discovery")
+		fmt.Println("  adbgo lan doctor <addr>         Diagnose why an address won't connect")
+		fmt.Println("  adbgo lan nets                  Interfaces, subnets, gateway")
+		fmt.Println("  adbgo lan known [connect|forget <addr>]")
+		return
+	}
+	switch args[0] {
+	case "sweep":
+		ui.PrintWarning("Authorized use only — scan networks you own.")
+		ui.PrintInfo("Sweeping local subnets for port 5555...")
+		targets, err := adb.ScanLANPorts(5555, func(done, total int) {
+			fmt.Printf("\r  probing %d/%d hosts...", done, total)
+		})
+		fmt.Println()
+		if err != nil {
+			ui.PrintError(err.Error())
+			os.Exit(1)
+		}
+		if len(targets) == 0 {
+			ui.PrintWarning("Nothing on 5555 — wireless debugging uses random ports. Try: adbgo lan mdns")
+			return
+		}
+		for _, t := range targets {
+			p := adb.ProbeTarget(t)
+			fmt.Printf("  • %-22s %-12s %s\n", t, p.State, p.Model)
+			if p.Note != "" && p.State != "device" {
+				fmt.Println("    " + p.Note)
+			}
+		}
+		ui.PrintInfo("Connect with: adbgo connect <ip:port>")
+
+	case "deep":
+		if len(args) < 2 {
+			ui.PrintError("Usage: adbgo lan deep <ip>")
+			os.Exit(1)
+		}
+		ip := args[1]
+		ui.PrintWarning("Authorized use only — scan devices you own.")
+		ui.PrintInfo("Deep-scanning " + ip + " for adbd (5555 + ports 30000-65535)...")
+		ports := adb.DeepScanHost(ip, 350*time.Millisecond, 512, func(open, done, total int) {
+			fmt.Printf("\r  %d/%d ports probed, %d open   ", done, total, open)
+		}, nil)
+		fmt.Println()
+		if len(ports) == 0 {
+			ui.PrintWarning("No adbd port found on " + ip)
+			return
+		}
+		fmt.Printf("Open: %v\n", ports)
+		for _, p := range ports {
+			addr := ip + ":" + strconv.Itoa(p)
+			probe := adb.ProbeTarget(addr)
+			fmt.Printf("  • %-22s %-12s %s\n", addr, probe.State, probe.Model)
+			if probe.Note != "" && probe.State != "device" {
+				fmt.Println("    " + probe.Note)
+			}
+		}
+
+	case "doctor":
+		if len(args) < 2 {
+			ui.PrintError("Usage: adbgo lan doctor <ip[:port]>")
+			os.Exit(1)
+		}
+		for _, line := range adb.DiagnoseTarget(args[1]) {
+			fmt.Println("  " + line)
+		}
+
+	case "nets":
+		for _, n := range adb.DiscoverLANNetworks(true) {
+			fmt.Printf("  %-12s %-19s %s\n", n.Iface, n.CIDR, n.Source)
+		}
+		if gw := adb.DefaultGateway(); gw != "" {
+			fmt.Println("  default gateway: " + gw)
+		}
+
+	case "mdns":
+		backend := adb.DiscoverMDNSSafe()
+		raw := adb.QueryMDNSService(adb.MDNSConnectService, 3*time.Second)
+		fmt.Println("adb mDNS backend:")
+		for _, t := range backend {
+			fmt.Println("  • " + t.Instance + " → " + t.Addr)
+		}
+		if len(backend) == 0 {
+			fmt.Println("  (nothing)")
+		}
+		fmt.Println("raw multicast:")
+		for _, t := range raw {
+			fmt.Println("  • " + t.Instance + " → " + t.Addr)
+		}
+		if len(raw) == 0 {
+			fmt.Println("  (nothing)")
+		}
+		merged := adb.MergeMDNSTargets(backend, raw)
+		if len(merged) > 0 {
+			ui.PrintSuccess(fmt.Sprintf("%d wireless device(s) reachable — connect: adbgo connect <addr>", len(merged)))
+		} else {
+			ui.PrintWarning("No wireless devices. Enable Wireless debugging on the phone and pair (adbgo pairqr).")
+		}
+
+	case "known":
+		if len(args) >= 3 && args[1] == "connect" {
+			if _, err := adb.ConnectReliable(args[2], 2); err != nil {
+				ui.PrintError(err.Error())
+				os.Exit(1)
+			}
+			ui.PrintSuccess("Connected to " + args[2])
+			return
+		}
+		if len(args) >= 3 && args[1] == "forget" {
+			if adb.ForgetEndpoint(args[2]) {
+				ui.PrintSuccess("Forgot " + args[2])
+			} else {
+				ui.PrintWarning("No saved endpoint for " + args[2])
+			}
+			return
+		}
+		endpoints := adb.KnownEndpoints()
+		if len(endpoints) == 0 {
+			ui.PrintWarning("No known phones yet.")
+			return
+		}
+		for _, e := range endpoints {
+			fmt.Printf("  %-16s %-22s %-14s %s\n", e.Name, e.Addr, e.Model, e.When)
+		}
+
+	default:
+		ui.PrintError("Unknown lan subcommand: " + args[0])
 		os.Exit(1)
 	}
 }

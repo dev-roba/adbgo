@@ -56,8 +56,9 @@ func DiscoverMDNSDetailed() ([]MDNSTarget, error) {
 }
 
 // WaitForPairingService polls mDNS for the phone's pairing service after
-// it scanned the QR. It prefers the instance matching our service name
-// but accepts any _adb-tls-pairing advertisement.
+// it scanned the QR. It uses the adb backend first and falls back to a
+// raw multicast query each round, preferring the instance matching our
+// service name but accepting any _adb-tls-pairing advertisement.
 func WaitForPairingService(name string, timeout time.Duration, tick func(elapsed int)) (string, error) {
 	start := time.Now()
 	deadline := start.Add(timeout)
@@ -65,30 +66,41 @@ func WaitForPairingService(name string, timeout time.Duration, tick func(elapsed
 		if tick != nil {
 			tick(int(time.Since(start).Seconds()))
 		}
-		out, _ := RunRaw("mdns", "services")
-		fallback := ""
-		for _, line := range strings.Split(out, "\n") {
-			if !strings.Contains(line, "_adb-tls-pairing._tcp") {
-				continue
-			}
-			parts := strings.Fields(line)
-			if len(parts) < 3 {
-				continue
-			}
-			addr := parts[len(parts)-1]
-			if fallback == "" {
-				fallback = addr
-			}
-			if strings.Contains(parts[1], name) {
-				return addr, nil
-			}
+		if addr, err := pairingServiceFromADB(name); err == nil {
+			return addr, nil
 		}
-		if fallback != "" {
-			return fallback, nil
+		if addr, err := FindPairingService(name, 2*time.Second); err == nil {
+			return addr, nil
 		}
 		time.Sleep(1 * time.Second)
 	}
 	return "", fmt.Errorf("no pairing service appeared within %s — make sure the phone scanned the QR and is on the same Wi-Fi", timeout)
+}
+
+// pairingServiceFromADB looks for the pairing service via `adb mdns services`.
+func pairingServiceFromADB(name string) (string, error) {
+	out, _ := RunRaw("mdns", "services")
+	fallback := ""
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, "_adb-tls-pairing._tcp") {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) < 3 {
+			continue
+		}
+		addr := parts[len(parts)-1]
+		if fallback == "" {
+			fallback = addr
+		}
+		if strings.Contains(parts[1], name) {
+			return addr, nil
+		}
+	}
+	if fallback != "" {
+		return fallback, nil
+	}
+	return "", fmt.Errorf("pairing service not found via adb mdns")
 }
 
 // PairWithAddr runs `adb pair` against the phone's pairing service using

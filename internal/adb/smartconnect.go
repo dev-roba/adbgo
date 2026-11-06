@@ -67,6 +67,31 @@ func (k *knownFile) Remember(name, model, addr string) {
 	k.Endpoints = append(k.Endpoints, KnownEndpoint{Name: name, Model: model, Addr: addr, When: when})
 }
 
+// KnownEndpoints returns the saved endpoints for display and managers.
+func KnownEndpoints() []KnownEndpoint {
+	return LoadKnown().Endpoints
+}
+
+// ForgetEndpoint drops a saved endpoint by address and reports whether
+// anything was removed.
+func ForgetEndpoint(addr string) bool {
+	kf := LoadKnown()
+	var kept []KnownEndpoint
+	removed := false
+	for _, e := range kf.Endpoints {
+		if e.Addr == addr {
+			removed = true
+			continue
+		}
+		kept = append(kept, e)
+	}
+	if removed {
+		kf.Endpoints = kept
+		_ = kf.Save()
+	}
+	return removed
+}
+
 // rememberEndpoint saves a successful endpoint for next time.
 func rememberEndpoint(name, fallback, model, addr string) {
 	if name == "" {
@@ -110,9 +135,42 @@ func instanceMatches(want, instance string) bool {
 	return false
 }
 
-// SmartConnect runs the full priority chain — USB → mDNS → saved
-// endpoints → LAN sweep for port 5555 — and reports which hop worked.
-// It only touches networks this machine sits on.
+// tryMDNSChain attempts each advertised target. With a name filter it
+// also connects and verifies the model, because mDNS instance names are
+// random strings that never contain a phone's model.
+func tryMDNSChain(targets []MDNSTarget, want string, say func(string)) (string, string, bool) {
+	for _, t := range targets {
+		if t.Addr == "" {
+			continue
+		}
+		if want != "" && !instanceMatches(want, t.Instance) {
+			// instance names are random — connect and check the model
+			if err := ConnectDirect(t.Addr); err != nil || !IsConnected(t.Addr) {
+				continue
+			}
+			model := modelOf(t.Addr)
+			if !strings.Contains(strings.ToLower(model), want) {
+				continue
+			}
+			say("hop 2 (mDNS): " + model + " answers as '" + t.Instance + "' at " + t.Addr)
+			rememberEndpoint(want, model, model, t.Addr)
+			return t.Addr, "mDNS", true
+		}
+		if err := ConnectDirect(t.Addr); err != nil || !IsConnected(t.Addr) {
+			continue
+		}
+		model := modelOf(t.Addr)
+		say("hop 2 (mDNS): " + t.Instance + " at " + t.Addr)
+		rememberEndpoint(want, t.Instance, model, t.Addr)
+		return t.Addr, "mDNS", true
+	}
+	return "", "", false
+}
+
+// SmartConnect runs the full priority chain — USB → mDNS (adb backend +
+// raw multicast fallback) → saved endpoints → LAN sweep for port 5555 —
+// and reports which hop worked. It only touches networks this machine
+// sits on.
 func SmartConnect(name string, verbose func(string)) (string, string, error) {
 	say := func(msg string) {
 		if verbose != nil {
@@ -133,18 +191,12 @@ func SmartConnect(name string, verbose func(string)) (string, string, error) {
 		}
 	}
 
-	// Hop 2: mDNS advertisements.
-	targets, _ := DiscoverMDNSDetailed()
-	for _, t := range targets {
-		if want != "" && !instanceMatches(want, t.Instance) {
-			continue
-		}
-		if err := ConnectDirect(t.Addr); err == nil && IsConnected(t.Addr) {
-			model := modelOf(t.Addr)
-			say("hop 2 (mDNS): " + t.Instance + " at " + t.Addr)
-			rememberEndpoint(want, t.Instance, model, t.Addr)
-			return t.Addr, "mDNS", nil
-		}
+	// Hop 2: mDNS — adb backend first, raw multicast as fallback.
+	if serial, how, ok := tryMDNSChain(DiscoverMDNSSafe(), want, say); ok {
+		return serial, how, nil
+	}
+	if serial, how, ok := tryMDNSChain(QueryMDNSService(MDNSConnectService, 2*time.Second), want, say); ok {
+		return serial, how, nil
 	}
 
 	// Hop 3: saved endpoints from ~/.config/adbgo/known.json.
@@ -155,11 +207,12 @@ func SmartConnect(name string, verbose func(string)) (string, string, error) {
 		}
 		say("hop 3 (saved): trying " + e.Name + " at " + e.Addr)
 		if err := ConnectDirect(e.Addr); err == nil && IsConnected(e.Addr) {
+			rememberEndpoint(e.Name, e.Name, e.Model, e.Addr) // refresh last-seen
 			return e.Addr, "saved endpoint", nil
 		}
 	}
 
-	// Hop 4: sweep the LAN for port 5555.
+	// Hop 4: sweep the LAN for adbd on port 5555.
 	say("hop 4: sweeping the LAN for port 5555...")
 	open, _ := ScanLANPorts(5555, nil)
 	for _, addr := range open {
@@ -171,5 +224,5 @@ func SmartConnect(name string, verbose func(string)) (string, string, error) {
 		}
 	}
 
-	return "", "", fmt.Errorf("no reachable phone found (tried USB, mDNS, %d saved endpoint(s), LAN sweep)", len(kf.Endpoints))
+	return "", "", fmt.Errorf("no reachable phone found (tried USB, mDNS incl. raw multicast, %d saved endpoint(s), LAN sweep) — a phone using wireless debugging? Run `adbgo pairqr` or `adbgo lan deep <ip>`", len(kf.Endpoints))
 }
